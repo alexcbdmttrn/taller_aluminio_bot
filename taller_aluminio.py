@@ -29,7 +29,7 @@ def analizar_con_ia(texto, historial_mensajes, cliente_activo=""):
     
     if historial_mensajes:
         contexto += "[Historial de los últimos mensajes]:\n"
-        for msg in historial_mensajes[-10:]:  # MEMORIA DE 10 MENSAJES
+        for msg in historial_mensajes[-10:]:
             contexto += f"- {msg}\n"
     
     contexto += f"\n[Mensaje actual del jefe]: {texto}"
@@ -39,7 +39,7 @@ def analizar_con_ia(texto, historial_mensajes, cliente_activo=""):
 Analiza el mensaje usando el CONTEXTO y el HISTORIAL. 
 Responde SOLO con un objeto JSON válido con esta estructura exacta:
 {{
-  "accion": "registrar_proyecto" | "registrar_pago" | "registrar_compra" | "consultar" | "preguntar",
+  "accion": "registrar_proyecto" | "registrar_pago" | "registrar_compra" | "actualizar_proyecto" | "consultar" | "preguntar",
   "cliente": "nombre del cliente o el cliente_activo",
   "monto": numero o 0,
   "descripcion": "resumen breve del trabajo o gasto",
@@ -48,16 +48,17 @@ Responde SOLO con un objeto JSON válido con esta estructura exacta:
   "estado": "Pendiente de cotizar" | "Aceptado" | "En proceso" | "Por cobrar" | "Liquidado",
   "tipo_consulta": "deudores" | "pendientes" | "todos" | "liquidados",
   "pregunta": "texto si necesitas preguntar algo",
-  "resumen": "Frase corta y clara de lo que vas a guardar (Ej: 'Presupuesto de $5000 a Don Pedro por 3 ventanas. Tel: 5551234')"
+  "resumen": "Frase corta y clara de lo que vas a guardar o actualizar"
 }}
 
 REGLAS DE ORO:
-1. Si falta info crítica y no está en el historial, accion: "preguntar".
-2. Si habla de COMPRAR, accion: "registrar_compra".
-3. Si habla de COBRAR/PAGAR, accion: "registrar_pago".
-4. Si habla de NUEVO TRABAJO, accion: "registrar_proyecto".
-5. Si pregunta quién debe o resumen, accion: "consultar".
-6. El campo "resumen" es OBLIGATORIO y debe ser claro para que el jefe lo lea rápido.
+1. Si el jefe menciona un cliente y un trabajo que ya existe en el historial, o usa palabras como "cambia", "modifica", "no, era", "actualiza", la accion DEBE ser "actualizar_proyecto".
+2. Si falta info crítica y no está en el historial, accion: "preguntar".
+3. Si habla de COMPRAR, accion: "registrar_compra".
+4. Si habla de COBRAR/PAGAR, accion: "registrar_pago".
+5. Si habla de un NUEVO TRABAJO (no mencionado antes), accion: "registrar_proyecto".
+6. Si pregunta quién debe o resumen, accion: "consultar".
+7. El campo "resumen" es OBLIGATORIO.
 
 {contexto}
 Responde ÚNICAMENTE con el JSON."""
@@ -89,7 +90,6 @@ def buscar_o_crear_cliente(cur, nombre_cliente, telefono="", direccion=""):
     
     if cliente:
         cliente_id = cliente[0]
-        # Actualizar teléfono/dirección si el jefe los mencionó ahora
         if telefono or direccion:
             cur.execute("""UPDATE clientes SET 
                            telefono = COALESCE(%s, telefono), 
@@ -106,6 +106,24 @@ def registrar_proyecto(cur, cliente_id, descripcion, monto, estado):
                    VALUES (%s, %s, %s, 0, %s) RETURNING id""", 
                 (cliente_id, descripcion, monto, estado))
     return cur.fetchone()[0]
+
+def actualizar_proyecto(cur, cliente_nombre, descripcion, monto, estado):
+    cur.execute("""
+        SELECT p.id FROM proyectos p
+        JOIN clientes c ON p.cliente_id = c.id
+        WHERE c.nombre ILIKE %s AND p.estado != 'Liquidado'
+        ORDER BY p.fecha_creacion DESC LIMIT 1
+    """, (f"%{cliente_nombre}%",))
+    proyecto = cur.fetchone()
+    
+    if proyecto:
+        cur.execute("""
+            UPDATE proyectos 
+            SET descripcion = %s, monto_total = %s, estado = %s
+            WHERE id = %s
+        """, (descripcion, monto, estado, proyecto[0]))
+        return True
+    return False
 
 def registrar_pago(cur, cliente_nombre, monto_pago):
     cur.execute("""SELECT p.id, p.monto_total, p.monto_pagado, p.estado
@@ -152,8 +170,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['cliente_activo'] = ""
     await update.message.reply_text(
         "¡Hola Jefe! ️ Asistente listo.\n\n"
-        "Háblame natural. Guardaré teléfono y dirección si los mencionas.\n"
-        "Al guardar, te mostraré un resumen. Si está mal, solo dime 'cambia el monto a 5000' o 'es para Don Juan'."
+        "Háblame natural. Si corriges algo, lo actualizaré en lugar de duplicarlo."
     )
 
 async def comando_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,7 +180,7 @@ async def comando_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Cliente activo: **{cliente_nombre}**", parse_mode='Markdown')
     else:
         actual = context.user_data.get('cliente_activo', 'Ninguno')
-        await update.message.reply_text(f"📌 Cliente activo: **{actual}**", parse_mode='Markdown')
+        await update.message.reply_text(f" Cliente activo: **{actual}**", parse_mode='Markdown')
 
 async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, texto_original: str):
     try:
@@ -177,7 +194,6 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         datos = analizar_con_ia(texto_original, historial, cliente_activo)
         accion = datos.get("accion", "preguntar")
         
-        # Guardar historial de la respuesta para que la IA sepa qué pasó
         historial.append(f"[Sistema: La IA entendió {accion}]")
         context.user_data['historial'] = historial
         
@@ -199,7 +215,7 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
                 
             msg = ""
             if tipo == "deudores":
-                msg = " **DEUDORES:**\n\n"
+                msg = "🔴 **DEUDORES:**\n\n"
                 for n, d, t, p, s in proyectos: msg += f"👤 {n}\n🔧 {d}\n💰 **Debe: ${s:.2f}**\n\n"
             elif tipo == "pendientes":
                 msg = "📝 **POR COTIZAR:**\n\n"
@@ -208,7 +224,7 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
                 msg = "✅ **LIQUIDADOS:**\n\n"
                 for n, d, t in proyectos: msg += f"👤 {n} - {d} (${t:.2f})\n"
             else:
-                msg = "📊 **RESUMEN:**\n\n"
+                msg = " **RESUMEN:**\n\n"
                 for n, d, t, p, e in proyectos: msg += f"👤 {n} | {d} | ${t} (Pagado: ${p}) | {e}\n\n"
             await update.message.reply_text(msg, parse_mode='Markdown')
             return
@@ -230,35 +246,43 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
 
         if accion == "registrar_proyecto":
             buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion)
-            cliente_id = buscar_o_crear_cliente(cur, cliente_nombre) # Re-buscar para obtener ID actualizado
+            cliente_id = buscar_o_crear_cliente(cur, cliente_nombre)
             registrar_proyecto(cur, cliente_id, descripcion, monto, estado)
+            respuesta = f"✅ **Nuevo proyecto guardado:**\n{resumen_ia}"
+            
+        elif accion == "actualizar_proyecto":
+            buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion)
+            actualizado = actualizar_proyecto(cur, cliente_nombre, descripcion, monto, estado)
+            if actualizado:
+                respuesta = f"️ **Proyecto actualizado:**\n{resumen_ia}"
+            else:
+                respuesta = f"⚠️ No encontré proyectos activos para {cliente_nombre} para actualizar."
             
         elif accion == "registrar_pago":
             buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion)
             _, msg_pago = registrar_pago(cur, cliente_nombre, monto)
-            resumen_ia += f"\n Pago: ${monto:.2f}. {msg_pago}"
+            respuesta = f" **Pago registrado:**\n{resumen_ia}\n{msg_pago}"
             
         elif accion == "registrar_compra":
             registrar_compra(cur, descripcion, monto)
-            resumen_ia = f"🛒 Compra: {descripcion} (${monto:.2f})"
+            respuesta = f"🛒 **Compra registrada:**\n{resumen_ia}"
             
         conn.commit()
         cur.close(); conn.close()
         
-        # MENSAJE DE CONFIRMACIÓN INTELIGENTE
-        respuesta = f"✅ **Guardado:**\n{resumen_ia}\n\n_(Si está mal, dime qué cambiar, ej: 'cambia el monto a 5000')_"
+        respuesta += "\n\n_(Si está mal, dime qué cambiar)_"
         await update.message.reply_text(respuesta, parse_mode='Markdown')
 
     except Exception as e:
         logging.error(f"🔴 Error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:150]}")
+        await update.message.reply_text(f" Error: {str(e)[:150]}")
 
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
         await procesar_texto(update, context, update.message.text)
     elif update.message.voice:
         try:
-            await update.message.reply_text("🎙️ Escuchando...")
+            await update.message.reply_text("️ Escuchando...")
             file = await context.bot.get_file(update.message.voice.file_id)
             ruta = 'voice.ogg'
             await file.download_to_drive(ruta)
@@ -276,5 +300,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("cliente", comando_cliente))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print(" Bot final con memoria de 10, confirmación y datos extra iniciado...")
+    print("🤖 Bot final con memoria, confirmación y actualizaciones inteligentes iniciado...")
     app.run_polling(drop_pending_updates=True)
