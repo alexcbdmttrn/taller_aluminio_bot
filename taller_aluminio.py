@@ -20,9 +20,10 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# 2. FUNCIÓN DE INTELIGENCIA ARTIFICIAL (GEMINI 1.5 FLASH - ESTABLE)
+# 2. FUNCIÓN DE INTELIGENCIA ARTIFICIAL (MODELO ESTABLE 002)
 def analizar_con_gemini(texto):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # Usamos gemini-1.5-flash-002 que es la versión estable y gratuita actual
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-002:generateContent?key={GEMINI_API_KEY}"
     
     prompt = f"""Eres el secretario de un taller de aluminio. Analiza este mensaje y responde SOLO con un objeto JSON válido.
 Formato JSON requerido:
@@ -135,11 +136,10 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 5. INICIO DEL BOT
 if __name__ == '__main__':
-    # drop_pending_updates=True evita que procese mensajes antiguos acumulados
+    # drop_pending_updates=True es CLAVE para evitar el error de "Conflict"
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, manejar_mensaje))
     
-    print("🤖 Bot iniciado con Gemini 1.5 Flash, Groq y DB...")
+    print("🤖 Bot iniciado con Gemini 1.5 Flash 002, Groq y DB...")
     app.run_polling(drop_pending_updates=True)
-
