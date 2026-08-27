@@ -142,3 +142,4 @@ if __name__ == '__main__':
     
     print("🤖 Bot iniciado con Gemini 1.5 Flash, Groq y DB...")
     app.run_polling(drop_pending_updates=True)
+
