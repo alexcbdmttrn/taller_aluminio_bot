@@ -20,10 +20,9 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# 2. FUNCIÓN DE INTELIGENCIA ARTIFICIAL (GEMINI 2.0 FLASH)
+# 2. FUNCIÓN DE INTELIGENCIA ARTIFICIAL (GEMINI 1.5 FLASH - ESTABLE)
 def analizar_con_gemini(texto):
-    print(" PASO 1: Preparando petición a Gemini...")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     prompt = f"""Eres el secretario de un taller de aluminio. Analiza este mensaje y responde SOLO con un objeto JSON válido.
 Formato JSON requerido:
@@ -37,16 +36,12 @@ Responde ÚNICAMENTE con el JSON, sin texto extra, sin markdown, sin comillas al
         "contents": [{"parts": [{"text": prompt}]}]
     }
     
-    print("🟢 PASO 2: Enviando petición a Google (con timeout de 20s)...")
-    # AGREGAMOS TIMEOUT DE 20 SEGUNDOS PARA QUE NO SE CUELgue
     response = requests.post(url, json=payload, timeout=20)
     data = response.json()
     
-    print("🟢 PASO 3: Respuesta de Google recibida. Analizando...")
-    
     if "candidates" not in data:
         error_msg = data.get("error", {}).get("message", "Error desconocido")
-        print(f"🔴 ERROR CRÍTICO DE GEMINI: {data}")
+        print(f"🔴 ERROR DE GEMINI: {data}")
         raise Exception(f"La IA falló: {error_msg}")
         
     texto_respuesta = data["candidates"][0]["content"]["parts"][0]["text"]
@@ -73,20 +68,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def procesar_texto(update: Update, texto_original: str):
     try:
-        print(f"🟡 Procesando texto: {texto_original}")
+        print(f"🟡 Procesando: {texto_original}")
         datos = analizar_con_gemini(texto_original)
-        print(f"🟡 Datos extraídos por IA: {datos}")
+        print(f"🟡 Datos IA: {datos}")
         
         cliente_nombre = datos.get("cliente", "Desconocido")
-        monto = datos.get("monto", 0)
+        monto = float(datos.get("monto", 0))
         descripcion = datos.get("descripcion", texto_original)
         estado = datos.get("estado", "Pendiente de cotizar")
 
-        print(" Guardando en Base de Datos...")
         conn = get_db_connection()
         cur = conn.cursor()
         
-        cur.execute("SELECT id FROM clientes WHERE nombre = %s", (cliente_nombre,))
+        cur.execute("SELECT id FROM clientes WHERE nombre ILIKE %s", (f"%{cliente_nombre}%",))
         cliente = cur.fetchone()
         
         if cliente:
@@ -103,7 +97,6 @@ async def procesar_texto(update: Update, texto_original: str):
         conn.commit()
         cur.close()
         conn.close()
-        print(" Guardado en DB exitosamente.")
         
         resumen = (
             f"✅ **¡Anotado y guardado!**\n\n"
@@ -115,12 +108,12 @@ async def procesar_texto(update: Update, texto_original: str):
         await update.message.reply_text(resumen, parse_mode='Markdown')
         
     except Exception as e:
-        logging.error(f"🔴 Error en procesar_texto: {e}")
+        logging.error(f"🔴 Error: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
-        await update.message.reply_text(" Procesando...")
+        await update.message.reply_text("🧠 Procesando...")
         await procesar_texto(update, update.message.text)
         
     elif update.message.voice:
@@ -133,7 +126,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             texto_transcrito = transcribir_audio(ruta_audio)
             os.remove(ruta_audio)
             
-            await update.message.reply_text(f" *Transcripción:* \"{texto_transcrito}\"", parse_mode='Markdown')
+            await update.message.reply_text(f"📝 *Transcripción:* \"{texto_transcrito}\"", parse_mode='Markdown')
             await procesar_texto(update, texto_transcrito)
             
         except Exception as e:
@@ -142,9 +135,10 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 5. INICIO DEL BOT
 if __name__ == '__main__':
+    # drop_pending_updates=True evita que procese mensajes antiguos acumulados
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, manejar_mensaje))
     
-    print(" Bot iniciado con Gemini 2.0 Flash, Groq y DB...")
-    app.run_polling()
+    print("🤖 Bot iniciado con Gemini 1.5 Flash, Groq y DB...")
+    app.run_polling(drop_pending_updates=True)
