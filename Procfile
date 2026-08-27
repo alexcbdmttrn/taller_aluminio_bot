@@ -1,1 +1,1 @@
-worker: python taller_aluminio.py
+   web: python taller_aluminio.py
