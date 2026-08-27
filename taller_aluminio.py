@@ -3,6 +3,7 @@ import json
 import logging
 import psycopg2
 import google.generativeai as genai
+from groq import Groq
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -13,10 +14,12 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-# Configurar Gemini
+# Configurar IAs
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -24,11 +27,11 @@ def get_db_connection():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "¡Hola! Soy el asistente del taller. 🛠️\n\n"
-        "Dime qué hiciste o qué te pidieron. Ejemplo:\n"
+        "Puedes enviarme *texto* o *notas de voz*. Ejemplo:\n"
         "'Cobro de 2500 a Don Pedro por el cancel de baño'"
     )
 
-def procesar_con_ia(texto):
+def analizar_con_gemini(texto):
     prompt = f"""
     Eres el secretario de un taller de aluminio. Analiza el siguiente mensaje y extrae la información en formato JSON estricto.
     Campos requeridos:
@@ -41,32 +44,32 @@ def procesar_con_ia(texto):
     
     Responde SOLO con el JSON, sin texto extra ni markdown.
     """
-    response = model.generate_content(prompt)
-    # Limpiar la respuesta por si Gemini agrega ```json ... ```
+    response = gemini_model.generate_content(prompt)
     texto_limpio = response.text.replace("```json", "").replace("```", "").strip()
     return json.loads(texto_limpio)
 
-async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = update.message.text
-    if not texto:
-        await update.message.reply_text("🎙️ Audio recibido. (La transcripción se activará en el siguiente paso).")
-        return
+def transcribir_audio(ruta_archivo):
+    with open(ruta_archivo, "rb") as file:
+        transcription = groq_client.audio.transcriptions.create(
+            file=(ruta_archivo, file.read()),
+            model="whisper-large-v3",
+            language="es"
+        )
+    return transcription.text
 
+async def procesar_texto(update: Update, texto_original: str):
     try:
-        # 1. Pedirle a la IA que entienda el mensaje
-        await update.message.reply_text("🧠 Pensando...")
-        datos = procesar_con_ia(texto)
+        await update.message.reply_text("🧠 Procesando...")
+        datos = analizar_con_gemini(texto_original)
         
         cliente_nombre = datos.get("cliente", "Desconocido")
         monto = datos.get("monto", 0)
-        descripcion = datos.get("descripcion", texto)
+        descripcion = datos.get("descripcion", texto_original)
         estado = datos.get("estado", "Pendiente de cotizar")
 
-        # 2. Guardar en la Base de Datos
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Buscar o crear cliente
         cur.execute("SELECT id FROM clientes WHERE nombre = %s", (cliente_nombre,))
         cliente = cur.fetchone()
         
@@ -76,7 +79,6 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("INSERT INTO clientes (nombre) VALUES (%s) RETURNING id", (cliente_nombre,))
             cliente_id = cur.fetchone()[0]
             
-        # Insertar proyecto
         cur.execute("""
             INSERT INTO proyectos (cliente_id, descripcion, monto_total, estado) 
             VALUES (%s, %s, %s, %s) RETURNING id
@@ -87,10 +89,9 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.close()
         conn.close()
         
-        # 3. Responder con resumen
         resumen = (
             f"✅ **¡Anotado y guardado!**\n\n"
-            f" *Cliente:* {cliente_nombre}\n"
+            f"👤 *Cliente:* {cliente_nombre}\n"
             f"🔧 *Trabajo:* {descripcion}\n"
             f"💰 *Monto:* ${monto}\n"
             f"📊 *Estado:* {estado}"
@@ -101,10 +102,33 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Error: {e}")
         await update.message.reply_text(f"❌ Hubo un error al procesar: {e}")
 
+async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Si es texto
+    if update.message.text:
+        await procesar_texto(update, update.message.text)
+    
+    # Si es audio (nota de voz)
+    elif update.message.voice:
+        try:
+            await update.message.reply_text("🎙️ Escuchando y transcribiendo...")
+            file = await context.bot.get_file(update.message.voice.file_id)
+            ruta_audio = 'voice.ogg'
+            await file.download_to_drive(ruta_audio)
+            
+            texto_transcrito = transcribir_audio(ruta_audio)
+            os.remove(ruta_audio) # Borrar el archivo temporal
+            
+            await update.message.reply_text(f"📝 *Transcripción:* \"{texto_transcrito}\"", parse_mode='Markdown')
+            await procesar_texto(update, texto_transcrito)
+            
+        except Exception as e:
+            logging.error(f"Error de audio: {e}")
+            await update.message.reply_text("❌ No pude transcribir el audio. Intenta de nuevo.")
+
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
+    app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, manejar_mensaje))
     
-    print("🤖 Bot iniciado con Cerebro IA y Memoria DB...")
+    print("🤖 Bot iniciado con Cerebro (Gemini), Oídos (Groq) y Memoria (DB)...")
     app.run_polling()
