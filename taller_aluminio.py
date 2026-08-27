@@ -20,10 +20,9 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# 2. FUNCIÓN DE INTELIGENCIA ARTIFICIAL (GEMINI)
+# 2. FUNCIÓN DE INTELIGENCIA ARTIFICIAL (GEMINI 2.0 FLASH)
 def analizar_con_gemini(texto):
-    # Usamos la versión v1 que es la más estable
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     
     prompt = f"""Eres el secretario de un taller de aluminio. Analiza este mensaje y responde SOLO con un objeto JSON válido.
 Formato JSON requerido:
@@ -40,7 +39,6 @@ Responde ÚNICAMENTE con el JSON, sin texto extra, sin markdown, sin comillas al
     response = requests.post(url, json=payload)
     data = response.json()
     
-    # Si Google responde con un error, lo mostramos claramente
     if "candidates" not in data:
         error_msg = data.get("error", {}).get("message", "Error desconocido")
         print(f"ERROR CRÍTICO DE GEMINI: {data}")
@@ -70,7 +68,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def procesar_texto(update: Update, texto_original: str):
     try:
-        # 1. Analizar con IA
         datos = analizar_con_gemini(texto_original)
         
         cliente_nombre = datos.get("cliente", "Desconocido")
@@ -78,7 +75,6 @@ async def procesar_texto(update: Update, texto_original: str):
         descripcion = datos.get("descripcion", texto_original)
         estado = datos.get("estado", "Pendiente de cotizar")
 
-        # 2. Guardar en Base de Datos
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -100,7 +96,6 @@ async def procesar_texto(update: Update, texto_original: str):
         cur.close()
         conn.close()
         
-        # 3. Responder al usuario
         resumen = (
             f"✅ **¡Anotado y guardado!**\n\n"
             f"👤 *Cliente:* {cliente_nombre}\n"
@@ -112,15 +107,13 @@ async def procesar_texto(update: Update, texto_original: str):
         
     except Exception as e:
         logging.error(f"Error: {e}")
-        await update.message.reply_text(f" Error: {str(e)}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Si es texto
     if update.message.text:
         await update.message.reply_text("🧠 Procesando...")
         await procesar_texto(update, update.message.text)
         
-    # Si es audio (nota de voz)
     elif update.message.voice:
         try:
             await update.message.reply_text("🎙️ Escuchando y transcribiendo...")
@@ -129,14 +122,14 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await file.download_to_drive(ruta_audio)
             
             texto_transcrito = transcribir_audio(ruta_audio)
-            os.remove(ruta_audio) # Borrar archivo temporal
+            os.remove(ruta_audio)
             
-            await update.message.reply_text(f" *Transcripción:* \"{texto_transcrito}\"", parse_mode='Markdown')
+            await update.message.reply_text(f"📝 *Transcripción:* \"{texto_transcrito}\"", parse_mode='Markdown')
             await procesar_texto(update, texto_transcrito)
             
         except Exception as e:
             logging.error(f"Error de audio: {e}")
-            await update.message.reply_text(f" Error con audio: {str(e)}")
+            await update.message.reply_text(f"❌ Error con audio: {str(e)}")
 
 # 5. INICIO DEL BOT
 if __name__ == '__main__':
@@ -144,5 +137,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, manejar_mensaje))
     
-    print("🤖 Bot iniciado con Gemini (REST), Groq y DB...")
+    print("🤖 Bot iniciado con Gemini 2.0 Flash, Groq y DB...")
     app.run_polling()
