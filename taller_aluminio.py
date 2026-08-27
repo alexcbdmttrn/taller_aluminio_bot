@@ -2,50 +2,42 @@ import os
 import json
 import logging
 import psycopg2
-import google.generativeai as genai
+import requests
 from groq import Groq
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Configuración
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Variables de entorno
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-# Configurar IAs
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel('gemini-2.0-flash')
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "¡Hola! Soy el asistente del taller. 🛠️\n\n"
-        "Puedes enviarme *texto* o *notas de voz*. Ejemplo:\n"
-        "'Cobro de 2500 a Don Pedro por el cancel de baño'"
-    )
-
 def analizar_con_gemini(texto):
-    prompt = f"""
-    Eres el secretario de un taller de aluminio. Analiza el siguiente mensaje y extrae la información en formato JSON estricto.
-    Campos requeridos:
-    - "cliente": Nombre del cliente (si no hay, pon "Desconocido").
-    - "monto": Número del monto total o cobro (si no hay, pon 0).
-    - "descripcion": Breve resumen del trabajo o cobro.
-    - "estado": "Aceptado" si es un cobro/trabajo real, "Pendiente de cotizar" si solo piden precio.
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
-    Mensaje del jefe: "{texto}"
+    prompt = f"""Eres el secretario de un taller de aluminio. Analiza este mensaje y responde SOLO con JSON válido:
+{{"cliente": "nombre o Desconocido", "monto": numero o 0, "descripcion": "resumen breve", "estado": "Aceptado" o "Pendiente de cotizar"}}
+
+Mensaje: "{texto}"
+Responde solo el JSON, sin texto extra."""
     
-    Responde SOLO con el JSON, sin texto extra ni markdown.
-    """
-    response = gemini_model.generate_content(prompt)
-    texto_limpio = response.text.replace("```json", "").replace("```", "").strip()
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+    
+    response = requests.post(url, json=payload)
+    data = response.json()
+    
+    # Extraer el texto de la respuesta
+    texto_respuesta = data["candidates"][0]["content"]["parts"][0]["text"]
+    texto_limpio = texto_respuesta.replace("```json", "").replace("```", "").strip()
     return json.loads(texto_limpio)
 
 def transcribir_audio(ruta_archivo):
@@ -56,6 +48,13 @@ def transcribir_audio(ruta_archivo):
             language="es"
         )
     return transcription.text
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "¡Hola! Soy el asistente del taller. 🛠️\n\n"
+        "Envíame texto o notas de voz. Ejemplo:\n"
+        "'Cobro de 2500 a Don Pedro por el cancel de baño'"
+    )
 
 async def procesar_texto(update: Update, texto_original: str):
     try:
@@ -100,35 +99,32 @@ async def procesar_texto(update: Update, texto_original: str):
         
     except Exception as e:
         logging.error(f"Error: {e}")
-        await update.message.reply_text(f"❌ Hubo un error al procesar: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
 
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Si es texto
     if update.message.text:
         await procesar_texto(update, update.message.text)
-    
-    # Si es audio (nota de voz)
     elif update.message.voice:
         try:
-            await update.message.reply_text("🎙️ Escuchando y transcribiendo...")
+            await update.message.reply_text("🎙️ Escuchando...")
             file = await context.bot.get_file(update.message.voice.file_id)
             ruta_audio = 'voice.ogg'
             await file.download_to_drive(ruta_audio)
             
             texto_transcrito = transcribir_audio(ruta_audio)
-            os.remove(ruta_audio) # Borrar el archivo temporal
+            os.remove(ruta_audio)
             
             await update.message.reply_text(f"📝 *Transcripción:* \"{texto_transcrito}\"", parse_mode='Markdown')
             await procesar_texto(update, texto_transcrito)
             
         except Exception as e:
             logging.error(f"Error de audio: {e}")
-            await update.message.reply_text("❌ No pude transcribir el audio. Intenta de nuevo.")
+            await update.message.reply_text(f"❌ Error con audio: {str(e)[:200]}")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, manejar_mensaje))
     
-    print("🤖 Bot iniciado con Cerebro (Gemini), Oídos (Groq) y Memoria (DB)...")
+    print("🤖 Bot iniciado con Gemini (REST), Groq y DB...")
     app.run_polling()
