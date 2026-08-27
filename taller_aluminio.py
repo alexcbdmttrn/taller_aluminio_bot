@@ -18,7 +18,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 # Configurar IAs
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+gemini_model = genai.GenerativeModel('gemini-2.0-flash')
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 def get_db_connection():
