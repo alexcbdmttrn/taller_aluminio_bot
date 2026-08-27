@@ -2,50 +2,43 @@ import os
 import json
 import logging
 import psycopg2
-import requests
+from openai import OpenAI
 from groq import Groq
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# 1. CONFIGURACIÓN BÁSICA
+# 1. CONFIGURACIÓN
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
+# Clientes de IA
+deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# 2. FUNCIÓN DE INTELIGENCIA ARTIFICIAL (MODELO ESTABLE 002)
-def analizar_con_gemini(texto):
-    # Usamos gemini-1.5-flash-002 que es la versión estable y gratuita actual
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-002:generateContent?key={GEMINI_API_KEY}"
-    
+# 2. FUNCIÓN DE INTELIGENCIA ARTIFICIAL (DEEPSEEK)
+def analizar_con_ia(texto):
     prompt = f"""Eres el secretario de un taller de aluminio. Analiza este mensaje y responde SOLO con un objeto JSON válido.
 Formato JSON requerido:
 {{"cliente": "nombre del cliente o Desconocido", "monto": numero o 0, "descripcion": "resumen breve del trabajo", "estado": "Aceptado" o "Pendiente de cotizar"}}
 
 Mensaje del jefe: "{texto}"
 
-Responde ÚNICAMENTE con el JSON, sin texto extra, sin markdown, sin comillas al inicio."""
+Responde ÚNICAMENTE con el JSON, sin texto extra, sin markdown."""
+
+    response = deepseek_client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1 # Temperatura baja para que sea estricto con el JSON
+    )
     
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
-    
-    response = requests.post(url, json=payload, timeout=20)
-    data = response.json()
-    
-    if "candidates" not in data:
-        error_msg = data.get("error", {}).get("message", "Error desconocido")
-        print(f"🔴 ERROR DE GEMINI: {data}")
-        raise Exception(f"La IA falló: {error_msg}")
-        
-    texto_respuesta = data["candidates"][0]["content"]["parts"][0]["text"]
+    texto_respuesta = response.choices[0].message.content
     texto_limpio = texto_respuesta.replace("```json", "").replace("```", "").strip()
     return json.loads(texto_limpio)
 
@@ -69,9 +62,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def procesar_texto(update: Update, texto_original: str):
     try:
-        print(f"🟡 Procesando: {texto_original}")
-        datos = analizar_con_gemini(texto_original)
-        print(f"🟡 Datos IA: {datos}")
+        await update.message.reply_text("🧠 Procesando con DeepSeek...")
+        datos = analizar_con_ia(texto_original)
         
         cliente_nombre = datos.get("cliente", "Desconocido")
         monto = float(datos.get("monto", 0))
@@ -81,6 +73,7 @@ async def procesar_texto(update: Update, texto_original: str):
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # Buscar cliente (búsqueda flexible)
         cur.execute("SELECT id FROM clientes WHERE nombre ILIKE %s", (f"%{cliente_nombre}%",))
         cliente = cur.fetchone()
         
@@ -114,7 +107,6 @@ async def procesar_texto(update: Update, texto_original: str):
 
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
-        await update.message.reply_text("🧠 Procesando...")
         await procesar_texto(update, update.message.text)
         
     elif update.message.voice:
@@ -136,10 +128,9 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 5. INICIO DEL BOT
 if __name__ == '__main__':
-    # drop_pending_updates=True es CLAVE para evitar el error de "Conflict"
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, manejar_mensaje))
     
-    print("🤖 Bot iniciado con Gemini 1.5 Flash 002, Groq y DB...")
+    print("🤖 Bot iniciado con DeepSeek, Groq y DB...")
     app.run_polling(drop_pending_updates=True)
