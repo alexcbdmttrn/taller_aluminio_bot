@@ -21,11 +21,14 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# 2. INTELIGENCIA ARTIFICIAL CON MEMORIA Y CONFIRMACIÓN
-def analizar_con_ia(texto, historial_mensajes, cliente_activo=""):
+# 2. INTELIGENCIA ARTIFICIAL
+def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_existentes=""):
     contexto = ""
     if cliente_activo:
         contexto += f"[Cliente activo actual: {cliente_activo}]\n"
+    
+    if proyectos_existentes:
+        contexto += f"[PROYECTOS EXISTENTES EN BASE DE DATOS]:\n{proyectos_existentes}\n"
     
     if historial_mensajes:
         contexto += "[Historial de los últimos mensajes]:\n"
@@ -34,31 +37,33 @@ def analizar_con_ia(texto, historial_mensajes, cliente_activo=""):
     
     contexto += f"\n[Mensaje actual del jefe]: {texto}"
     
-    prompt = f"""Eres el secretario experto de un taller de aluminio. Entiendes modismos y lenguaje coloquial.
+    prompt = f"""Eres el secretario experto de un taller de aluminio.
 
-Analiza el mensaje usando el CONTEXTO y el HISTORIAL. 
+Analiza el mensaje. 
 Responde SOLO con un objeto JSON válido con esta estructura exacta:
 {{
-  "accion": "registrar_proyecto" | "registrar_pago" | "registrar_compra" | "actualizar_proyecto" | "consultar" | "preguntar",
-  "cliente": "nombre del cliente o el cliente_activo",
+  "accion": "registrar_proyecto" | "registrar_pago" | "registrar_compra" | "actualizar_proyecto" | "consultar" | "preguntar" | "ignorar_duplicado",
+  "cliente": "nombre del cliente",
+  "nombre_corto": "Nombre breve del trabajo (ej: 'Cancel Baño', 'Ventanas Cocina'). OBLIGATORIO para proyectos.",
   "monto": numero o 0,
-  "descripcion": "resumen breve del trabajo o gasto",
+  "descripcion": "detalles técnicos (medidas, materiales)",
+  "notas": "notas adicionales (ej: 'urgente', 'le gusta blanco') o vacío",
   "telefono": "número si lo menciona, o vacío",
   "direccion": "dirección si la menciona, o vacío",
   "estado": "Pendiente de cotizar" | "Aceptado" | "En proceso" | "Por cobrar" | "Liquidado",
   "tipo_consulta": "deudores" | "pendientes" | "todos" | "liquidados",
   "pregunta": "texto si necesitas preguntar algo",
-  "resumen": "Frase corta y clara de lo que vas a guardar o actualizar"
+  "resumen": "Frase corta de lo que harás"
 }}
 
-REGLAS DE ORO:
-1. Si el jefe menciona un cliente y un trabajo que ya existe en el historial, o usa palabras como "cambia", "modifica", "no, era", "actualiza", la accion DEBE ser "actualizar_proyecto".
-2. Si falta info crítica y no está en el historial, accion: "preguntar".
-3. Si habla de COMPRAR, accion: "registrar_compra".
-4. Si habla de COBRAR/PAGAR, accion: "registrar_pago".
-5. Si habla de un NUEVO TRABAJO (no mencionado antes), accion: "registrar_proyecto".
-6. Si pregunta quién debe o resumen, accion: "consultar".
-7. El campo "resumen" es OBLIGATORIO.
+REGLAS CRÍTICAS:
+1. ANTI-DUPLICADOS: Si en [PROYECTOS EXISTENTES] hay un proyecto con el mismo `nombre_corto` o muy similar, la accion DEBE ser "ignorar_duplicado" o "actualizar_proyecto" si el jefe está corrigiendo.
+2. Si el jefe dice "cambia", "no era", "modifica", accion: "actualizar_proyecto".
+3. Si falta info crítica, accion: "preguntar".
+4. Si habla de COMPRAR, accion: "registrar_compra".
+5. Si habla de COBRAR/PAGAR/ANTICIPO, accion: "registrar_pago".
+6. Si es un trabajo NUEVO, accion: "registrar_proyecto".
+7. Si pregunta quién debe o resumen, accion: "consultar".
 
 {contexto}
 Responde ÚNICAMENTE con el JSON."""
@@ -84,44 +89,55 @@ def transcribir_audio(ruta_archivo):
     return transcription.text
 
 # 4. BASE DE DATOS
-def buscar_o_crear_cliente(cur, nombre_cliente, telefono="", direccion=""):
+def buscar_o_crear_cliente(cur, nombre_cliente, telefono="", direccion="", notas=""):
     cur.execute("SELECT id FROM clientes WHERE nombre ILIKE %s", (f"%{nombre_cliente}%",))
     cliente = cur.fetchone()
     
     if cliente:
         cliente_id = cliente[0]
-        if telefono or direccion:
+        if telefono or direccion or notas:
             cur.execute("""UPDATE clientes SET 
                            telefono = COALESCE(%s, telefono), 
-                           direccion = COALESCE(%s, direccion) 
-                           WHERE id = %s""", (telefono or None, direccion or None, cliente_id))
+                           direccion = COALESCE(%s, direccion),
+                           notas_adicionales = COALESCE(%s, notas_adicionales)
+                           WHERE id = %s""", (telefono or None, direccion or None, notas or None, cliente_id))
         return cliente_id
     else:
-        cur.execute("INSERT INTO clientes (nombre, telefono, direccion) VALUES (%s, %s, %s) RETURNING id", 
-                    (nombre_cliente, telefono or None, direccion or None))
+        cur.execute("INSERT INTO clientes (nombre, telefono, direccion, notas_adicionales) VALUES (%s, %s, %s, %s) RETURNING id", 
+                    (nombre_cliente, telefono or None, direccion or None, notas or None))
         return cur.fetchone()[0]
 
-def registrar_proyecto(cur, cliente_id, descripcion, monto, estado):
-    cur.execute("""INSERT INTO proyectos (cliente_id, descripcion, monto_total, monto_pagado, estado) 
-                   VALUES (%s, %s, %s, 0, %s) RETURNING id""", 
-                (cliente_id, descripcion, monto, estado))
+def obtener_proyectos_activos(cur, cliente_nombre):
+    cur.execute("""
+        SELECT p.id, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado 
+        FROM proyectos p 
+        JOIN clientes c ON p.cliente_id = c.id 
+        WHERE c.nombre ILIKE %s AND p.estado != 'Liquidado'
+        ORDER BY p.fecha_creacion DESC
+    """, (f"%{cliente_nombre}%",))
+    return cur.fetchall()
+
+def registrar_proyecto(cur, cliente_id, nombre_corto, descripcion, monto, estado, notas=""):
+    cur.execute("""INSERT INTO proyectos (cliente_id, nombre_corto, descripcion, monto_total, monto_pagado, estado, notas_adicionales) 
+                   VALUES (%s, %s, %s, %s, 0, %s, %s) RETURNING id""", 
+                (cliente_id, nombre_corto, descripcion, monto, estado, notas or None))
     return cur.fetchone()[0]
 
-def actualizar_proyecto(cur, cliente_nombre, descripcion, monto, estado):
+def actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, estado, notas=""):
     cur.execute("""
         SELECT p.id FROM proyectos p
         JOIN clientes c ON p.cliente_id = c.id
-        WHERE c.nombre ILIKE %s AND p.estado != 'Liquidado'
+        WHERE c.nombre ILIKE %s AND (p.nombre_corto ILIKE %s OR p.estado != 'Liquidado')
         ORDER BY p.fecha_creacion DESC LIMIT 1
-    """, (f"%{cliente_nombre}%",))
+    """, (f"%{cliente_nombre}%", f"%{nombre_corto}%"))
     proyecto = cur.fetchone()
     
     if proyecto:
         cur.execute("""
             UPDATE proyectos 
-            SET descripcion = %s, monto_total = %s, estado = %s
+            SET nombre_corto = %s, descripcion = %s, monto_total = %s, estado = %s, notas_adicionales = COALESCE(%s, notas_adicionales)
             WHERE id = %s
-        """, (descripcion, monto, estado, proyecto[0]))
+        """, (nombre_corto, descripcion, monto, estado, notas or None, proyecto[0]))
         return True
     return False
 
@@ -144,24 +160,24 @@ def registrar_pago(cur, cliente_nombre, monto_pago):
         
     cur.execute("UPDATE proyectos SET monto_pagado = %s, estado = %s WHERE id = %s", 
                 (nuevo_pagado, nuevo_estado, proyecto_id))
-    return proyecto_id, f"Saldo restante: ${saldo:.2f}. Estado: {nuevo_estado}"
+    return proyecto_id, f"Anticipo/Pago: ${monto_pago:.2f}. Saldo pendiente: ${saldo:.2f}. Estado: {nuevo_estado}"
 
 def registrar_compra(cur, descripcion, monto):
-    cur.execute("INSERT INTO proyectos (cliente_id, descripcion, monto_total, monto_pagado, estado) VALUES (0, %s, %s, %s, 'Gasto/Material')", 
+    cur.execute("INSERT INTO proyectos (cliente_id, nombre_corto, descripcion, monto_total, monto_pagado, estado) VALUES (0, 'Compra Material', %s, %s, %s, 'Gasto/Material')", 
                 (descripcion, monto, monto))
     return cur.rowcount > 0
 
 def consultar_proyectos(cur, tipo):
     if tipo == "deudores":
-        cur.execute("""SELECT c.nombre, p.descripcion, p.monto_total, p.monto_pagado, (p.monto_total - p.monto_pagado) as saldo
+        cur.execute("""SELECT c.nombre, p.nombre_corto, p.monto_total, p.monto_pagado, (p.monto_total - p.monto_pagado) as saldo
                        FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
                        WHERE p.estado IN ('Por cobrar', 'En proceso') AND p.monto_total > p.monto_pagado ORDER BY saldo DESC""")
     elif tipo == "pendientes":
-        cur.execute("""SELECT c.nombre, p.descripcion, p.monto_total FROM proyectos p JOIN clientes c ON p.cliente_id = c.id WHERE p.estado = 'Pendiente de cotizar'""")
+        cur.execute("""SELECT c.nombre, p.nombre_corto, p.monto_total FROM proyectos p JOIN clientes c ON p.cliente_id = c.id WHERE p.estado = 'Pendiente de cotizar'""")
     elif tipo == "liquidados":
-        cur.execute("""SELECT c.nombre, p.descripcion, p.monto_total FROM proyectos p JOIN clientes c ON p.cliente_id = c.id WHERE p.estado = 'Liquidado' LIMIT 10""")
+        cur.execute("""SELECT c.nombre, p.nombre_corto, p.monto_total FROM proyectos p JOIN clientes c ON p.cliente_id = c.id WHERE p.estado = 'Liquidado' LIMIT 10""")
     else:
-        cur.execute("""SELECT c.nombre, p.descripcion, p.monto_total, p.monto_pagado, p.estado FROM proyectos p JOIN clientes c ON p.cliente_id = c.id ORDER BY p.fecha_creacion DESC LIMIT 15""")
+        cur.execute("""SELECT c.nombre, p.nombre_corto, p.monto_total, p.monto_pagado, p.estado FROM proyectos p JOIN clientes c ON p.cliente_id = c.id ORDER BY p.fecha_creacion DESC LIMIT 15""")
     return cur.fetchall()
 
 # 5. MANEJO DE MENSAJES
@@ -169,8 +185,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['historial'] = []
     context.user_data['cliente_activo'] = ""
     await update.message.reply_text(
-        "¡Hola Jefe! ️ Asistente listo.\n\n"
-        "Háblame natural. Si corriges algo, lo actualizaré en lugar de duplicarlo."
+        "¡Hola Jefe! 🛠️ Asistente actualizado.\n\n"
+        "Ahora uso 'Nombres Cortos' (ej: Cancel Baño) para no duplicar proyectos y guardo notas adicionales."
     )
 
 async def comando_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -180,7 +196,7 @@ async def comando_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Cliente activo: **{cliente_nombre}**", parse_mode='Markdown')
     else:
         actual = context.user_data.get('cliente_activo', 'Ninguno')
-        await update.message.reply_text(f" Cliente activo: **{actual}**", parse_mode='Markdown')
+        await update.message.reply_text(f"📌 Cliente activo: **{actual}**", parse_mode='Markdown')
 
 async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, texto_original: str):
     try:
@@ -191,7 +207,26 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         if len(historial) > 10:
             historial = historial[-10:]
         
-        datos = analizar_con_ia(texto_original, historial, cliente_activo)
+        # PASO 1: Análisis inicial para detectar el cliente
+        datos_iniciales = analizar_con_ia(texto_original, historial, cliente_activo, "")
+        cliente_nombre = datos_iniciales.get("cliente", cliente_activo if cliente_activo else "")
+        
+        # PASO 2: Consultar base de datos
+        proyectos_existentes_str = ""
+        if cliente_nombre and cliente_nombre != "Desconocido":
+            conn_temp = get_db_connection()
+            cur_temp = conn_temp.cursor()
+            proyectos_existentes = obtener_proyectos_activos(cur_temp, cliente_nombre)
+            cur_temp.close(); conn_temp.close()
+            
+            if proyectos_existentes:
+                proyectos_existentes_str = "Lista de proyectos activos:\n"
+                for p_id, nombre_corto, desc, total, pagado, estado in proyectos_existentes:
+                    pendiente = total - pagado
+                    proyectos_existentes_str += f"- ID {p_id} | '{nombre_corto}' | Total: ${total} | Pagado: ${pagado} | Pendiente: ${pendiente} | {estado}\n"
+        
+        # PASO 3: Análisis final con la información de la base de datos
+        datos = analizar_con_ia(texto_original, historial, cliente_activo, proyectos_existentes_str)
         accion = datos.get("accion", "preguntar")
         
         historial.append(f"[Sistema: La IA entendió {accion}]")
@@ -200,6 +235,11 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         if accion == "preguntar":
             pregunta = datos.get("pregunta", "¿Me das más detalles?")
             await update.message.reply_text(f"🤔 {pregunta}")
+            return
+
+        if accion == "ignorar_duplicado":
+            resumen = datos.get("resumen", "Ya tengo este proyecto registrado.")
+            await update.message.reply_text(f"⚠️ {resumen}")
             return
 
         if accion == "consultar":
@@ -215,27 +255,31 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
                 
             msg = ""
             if tipo == "deudores":
-                msg = "🔴 **DEUDORES:**\n\n"
-                for n, d, t, p, s in proyectos: msg += f"👤 {n}\n🔧 {d}\n💰 **Debe: ${s:.2f}**\n\n"
+                msg = "🔴 **DEUDORES (Pendiente por pagar):**\n\n"
+                for n, nc, t, p, s in proyectos: msg += f"👤 {n} ({nc})\n💰 **Debe: ${s:.2f}**\n\n"
             elif tipo == "pendientes":
                 msg = "📝 **POR COTIZAR:**\n\n"
-                for n, d, t in proyectos: msg += f"👤 {n} - {d} (${t:.2f})\n"
+                for n, nc, t in proyectos: msg += f"👤 {n} - {nc} (${t:.2f})\n"
             elif tipo == "liquidados":
                 msg = "✅ **LIQUIDADOS:**\n\n"
-                for n, d, t in proyectos: msg += f"👤 {n} - {d} (${t:.2f})\n"
+                for n, nc, t in proyectos: msg += f"👤 {n} - {nc} (${t:.2f})\n"
             else:
-                msg = " **RESUMEN:**\n\n"
-                for n, d, t, p, e in proyectos: msg += f"👤 {n} | {d} | ${t} (Pagado: ${p}) | {e}\n\n"
+                msg = "📊 **RESUMEN:**\n\n"
+                for n, nc, t, p, e in proyectos: 
+                    pendiente = t - p
+                    msg += f"👤 {n} | {nc} | Total: ${t} | Pagado: ${p} | Pendiente: ${pendiente} | {e}\n\n"
             await update.message.reply_text(msg, parse_mode='Markdown')
             return
 
-        # Procesar datos
+        # Procesar datos finales
         cliente_nombre = datos.get("cliente", cliente_activo if cliente_activo else "Desconocido")
+        nombre_corto = datos.get("nombre_corto", "Proyecto General")
         monto = float(datos.get("monto", 0))
         descripcion = datos.get("descripcion", texto_original)
         estado = datos.get("estado", "Pendiente de cotizar")
         telefono = datos.get("telefono", "")
         direccion = datos.get("direccion", "")
+        notas = datos.get("notas", "")
         resumen_ia = datos.get("resumen", "")
 
         if cliente_nombre != "Desconocido" and cliente_nombre != cliente_activo:
@@ -245,23 +289,24 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         cur = conn.cursor()
 
         if accion == "registrar_proyecto":
-            buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion)
+            buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
             cliente_id = buscar_o_crear_cliente(cur, cliente_nombre)
-            registrar_proyecto(cur, cliente_id, descripcion, monto, estado)
-            respuesta = f"✅ **Nuevo proyecto guardado:**\n{resumen_ia}"
+            registrar_proyecto(cur, cliente_id, nombre_corto, descripcion, monto, estado, notas)
+            pendiente = monto # Como es nuevo, pendiente es el total
+            respuesta = f"✅ **Nuevo proyecto guardado:**\n{resumen_ia}\n Total: ${monto:.2f} | Pendiente: ${pendiente:.2f}"
             
         elif accion == "actualizar_proyecto":
-            buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion)
-            actualizado = actualizar_proyecto(cur, cliente_nombre, descripcion, monto, estado)
+            buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
+            actualizado = actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, estado, notas)
             if actualizado:
-                respuesta = f"️ **Proyecto actualizado:**\n{resumen_ia}"
+                respuesta = f"✏️ **Proyecto actualizado:**\n{resumen_ia}"
             else:
-                respuesta = f"⚠️ No encontré proyectos activos para {cliente_nombre} para actualizar."
+                respuesta = f"️ No encontré proyectos activos para {cliente_nombre}."
             
         elif accion == "registrar_pago":
             buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion)
             _, msg_pago = registrar_pago(cur, cliente_nombre, monto)
-            respuesta = f" **Pago registrado:**\n{resumen_ia}\n{msg_pago}"
+            respuesta = f"💰 **Pago/Anticipo registrado:**\n{resumen_ia}\n{msg_pago}"
             
         elif accion == "registrar_compra":
             registrar_compra(cur, descripcion, monto)
@@ -275,14 +320,14 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
 
     except Exception as e:
         logging.error(f"🔴 Error: {e}")
-        await update.message.reply_text(f" Error: {str(e)[:150]}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:150]}")
 
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
         await procesar_texto(update, context, update.message.text)
     elif update.message.voice:
         try:
-            await update.message.reply_text("️ Escuchando...")
+            await update.message.reply_text("🎙️ Escuchando...")
             file = await context.bot.get_file(update.message.voice.file_id)
             ruta = 'voice.ogg'
             await file.download_to_drive(ruta)
@@ -300,5 +345,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("cliente", comando_cliente))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot final con memoria, confirmación y actualizaciones inteligentes iniciado...")
+    print("🤖 Bot con DB estructurada y anti-duplicados inteligente iniciado...")
     app.run_polling(drop_pending_updates=True)
