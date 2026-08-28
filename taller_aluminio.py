@@ -2455,4 +2455,11 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("cliente", comando_cliente))
     app.add_handler(CommandHandler("estadisticas", comando_estadisticas))
     app.add_handler(CommandHandler("historial", comando_historial))
-    app.add_handler(CommandHandler("resumen", comando_resumen
+    app.add_handler(CommandHandler("resumen", comando_resumen))
+    app.add_handler(CommandHandler("material", comando_material))
+    app.add_handler(CommandHandler("presupuesto", comando_presupuesto))
+    app.add_handler(CommandHandler("gastos", comando_gastos))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
+    app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
+    print("🤖 Bot COMPLETO CORREGIDO: manejo de voz unificado, extracción de números mejorada, borrado de liquidados funcional.")
+    app.run_polling(drop_pending_updates=True)
