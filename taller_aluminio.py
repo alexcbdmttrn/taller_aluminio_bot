@@ -72,7 +72,6 @@ _PALABRAS_CIERRE = (
 ORDEN_ESTADOS = ["Cancelado", "Pendiente de cotizar", "Presupuesto enviado",
                   "Aceptado", "En proceso", "Por cobrar", "Liquidado"]
 
-# ==================== MAPA DE PALABRAS NUMÉRICAS ====================
 _PALABRAS_NUMERO = {
     "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5,
     "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10,
@@ -129,9 +128,9 @@ def _es_confirmacion(texto: str) -> bool:
     return False
 
 def _es_respuesta_numerica_simple(texto: str) -> float | None:
-    """Extrae un número de la respuesta del usuario, buscando dígitos o palabras numéricas."""
+    if texto is None:
+        return None
     texto_limpio = texto.lower().strip()
-    
     # Buscar dígitos
     numeros = re.findall(r'\d+(?:\.\d+)?', texto_limpio)
     if numeros:
@@ -139,21 +138,17 @@ def _es_respuesta_numerica_simple(texto: str) -> float | None:
             return float(numeros[0])
         except ValueError:
             pass
-    
     # Buscar palabras numéricas
     for palabra, valor in _PALABRAS_NUMERO.items():
-        if palabra in texto_limpio:
-            if re.search(rf'\b{palabra}\b', texto_limpio):
-                return float(valor)
-    
-    # Buscar números ordinales como "1°", "1er", etc.
+        if palabra in texto_limpio and re.search(rf'\b{palabra}\b', texto_limpio):
+            return float(valor)
+    # Buscar ordinales
     ordinal = re.search(r'(\d+)\s*(?:°|º|er|ro|do|da)', texto_limpio)
     if ordinal:
         try:
             return float(ordinal.group(1))
         except ValueError:
             pass
-    
     return None
 
 def _parece_descripcion_de_trabajo(texto_original: str) -> bool:
@@ -991,9 +986,16 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
     context.user_data['estado_espera'] = 'esperando_seleccion_borrado'
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-# ==================== VERSIÓN CORREGIDA DE procesar_seleccion_borrado ====================
-async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    respuesta = update.message.text
+# ==================== PROCESADOR DE SELECCIÓN DE BORRADO (con texto como argumento) ====================
+async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str = None):
+    # Si no se pasa texto, intentar obtenerlo del mensaje (para compatibilidad)
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe. Por favor, escribe el número.")
+            return
+
     try:
         items = context.user_data.get('borrar_items', [])
         tipo = context.user_data.get('borrar_tipo')
@@ -1002,11 +1004,11 @@ async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAU
             context.user_data['estado_espera'] = None
             return
 
-        resp = respuesta.strip().lower()
+        resp = texto.strip().lower()
         if resp == 'todos':
             ids = [int(item[0]) for item in items if str(item[0]).isdigit()]
         else:
-            numero = _es_respuesta_numerica_simple(respuesta)
+            numero = _es_respuesta_numerica_simple(resp)
             if numero is not None and numero.is_integer():
                 idx = int(numero) - 1
                 if 0 <= idx < len(items):
@@ -1016,7 +1018,7 @@ async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAU
                     return
             else:
                 # Fallback: buscar números con regex
-                numeros = re.findall(r'\b\d+\b', respuesta)
+                numeros = re.findall(r'\b\d+\b', resp)
                 if not numeros:
                     await update.message.reply_text("⚠️ No entendí. Escribe números separados por comas (ej: 1,3,5) o 'todos'.")
                     return
@@ -1042,8 +1044,15 @@ async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(f"❌ Error al procesar selección: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_confirmacion_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    respuesta = update.message.text
+async def procesar_confirmacion_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+
     try:
         ids = context.user_data.get('borrar_ids', [])
         tipo = context.user_data.get('borrar_tipo')
@@ -1052,7 +1061,7 @@ async def procesar_confirmacion_borrado(update: Update, context: ContextTypes.DE
             context.user_data['estado_espera'] = None
             return
 
-        if not _es_confirmacion(respuesta):
+        if not _es_confirmacion(texto):
             await update.message.reply_text("✅ Borrado cancelado, jefe.")
             context.user_data['estado_espera'] = None
             context.user_data['borrar_ids'] = None
@@ -1084,9 +1093,16 @@ async def procesar_confirmacion_borrado(update: Update, context: ContextTypes.DE
         await update.message.reply_text(f"❌ Error al borrar: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_tipo_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    respuesta = update.message.text
-    resp = respuesta.strip()
+async def procesar_tipo_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+
+    resp = texto.strip()
     if resp == '1':
         await iniciar_borrado(update, context, 'activos')
     elif resp == '2':
@@ -1541,58 +1557,12 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         logging.error(f"🔴 Error: {e}")
         await update.message.reply_text(f"❌ Error interno: {str(e)[:150]}. Lo siento, jefe.")
 
-# ==================== MANEJO DE MENSAJES (CORREGIDO CON ROUTING DE VOZ) ====================
+# ==================== MANEJO DE MENSAJES (UNIFICADO PARA TEXTO Y VOZ) ====================
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Obtener el texto transcrito (para voz) o el mensaje de texto
+    texto = None
     if update.message.text:
         texto = update.message.text
-        estado = context.user_data.get('estado_espera')
-
-        if estado and _es_escape(texto):
-            for key in list(context.user_data.keys()):
-                if key not in ('historial', 'cliente_activo', 'ultima_lista'):
-                    context.user_data[key] = None
-            context.user_data['estado_espera'] = None
-            await update.message.reply_text("✅ Ok, lo dejo así, jefe. ¿En qué más le ayudo?")
-            return
-
-        if estado == 'esperando_tipo_borrado':
-            await procesar_tipo_borrado(update, context)
-        elif estado == 'esperando_seleccion_borrado':
-            await procesar_seleccion_borrado(update, context)
-        elif estado == 'confirmar_borrado':
-            await procesar_confirmacion_borrado(update, context)
-        elif estado == 'seleccion_material':
-            await procesar_seleccion_material(update, context, texto)
-        elif estado == 'esperando_costo_material':
-            await procesar_costo_material(update, context, texto)
-        elif estado == 'seleccion_cancelar':
-            await procesar_seleccion_cancelar(update, context, texto)
-        elif estado == 'seleccion_presupuesto':
-            await procesar_seleccion_presupuesto(update, context, texto)
-        elif estado == 'seleccion_actualizar':
-            await procesar_seleccion_actualizar(update, context, texto)
-        elif estado == 'seleccion_pago':
-            await procesar_seleccion_pago(update, context, texto)
-        elif estado == 'seleccion_fusion':
-            await procesar_seleccion_fusion(update, context, texto)
-        elif estado == 'seleccion_explicar_estado':
-            await procesar_seleccion_explicar_estado(update, context, texto)
-        elif estado == 'esperando_cambio_estado':
-            await procesar_cambio_estado(update, context, texto)
-        elif estado == 'esperando_nuevo_estado':
-            await procesar_nuevo_estado(update, context, texto)
-        elif estado == 'confirmar_cliente_duplicado':
-            await procesar_confirmar_cliente_duplicado(update, context, texto)
-        elif estado == 'esperando_confirmacion_cierre':
-            await procesar_confirmacion_cierre(update, context, texto)
-        elif estado == 'seleccion_cierre':
-            await procesar_seleccion_cierre(update, context, texto)
-        elif estado == 'esperando_monto_cierre':
-            await procesar_monto_cierre(update, context, texto)
-        elif estado == 'esperando_confirmacion_monto_cierre':
-            await procesar_confirmacion_monto_cierre(update, context, texto)
-        else:
-            await procesar_texto(update, context, texto)
     elif update.message.voice:
         try:
             await update.message.reply_text("🎙️ Escuchando, jefe...")
@@ -1601,68 +1571,88 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await file.download_to_drive(ruta)
             texto = transcribir_audio(ruta)
             os.remove(ruta)
-            
-            # ==== CORRECCIÓN 1: ELIMINADA RESTRICCIÓN DE 3 PALABRAS ====
-            # Ya no se rechaza por longitud corta. Se acepta "uno", "el uno", etc.
-            
-            # Mostrar transcripción al jefe
+            # Mostrar la transcripción
             await update.message.reply_text(f"📝 *\"{texto}\"*", parse_mode='Markdown')
-            
-            # ==== CORRECCIÓN 2: ROUTING DE VOZ RESPETA estado_espera ====
-            estado = context.user_data.get('estado_espera')
-            
-            if estado and _es_escape(texto):
-                for key in list(context.user_data.keys()):
-                    if key not in ('historial', 'cliente_activo', 'ultima_lista'):
-                        context.user_data[key] = None
-                context.user_data['estado_espera'] = None
-                await update.message.reply_text("✅ Ok, lo dejo así, jefe. ¿En qué más le ayudo?")
+            # Si la transcripción está vacía o no se entendió, no continuar
+            if not texto or len(texto.strip()) == 0:
+                await update.message.reply_text("🎙️ No entendí bien el audio, ¿puedes repetirlo, jefe?")
                 return
-
-            if estado == 'esperando_tipo_borrado':
-                await procesar_tipo_borrado(update, context)
-            elif estado == 'esperando_seleccion_borrado':
-                await procesar_seleccion_borrado(update, context)
-            elif estado == 'confirmar_borrado':
-                await procesar_confirmacion_borrado(update, context)
-            elif estado == 'seleccion_material':
-                await procesar_seleccion_material(update, context, texto)
-            elif estado == 'esperando_costo_material':
-                await procesar_costo_material(update, context, texto)
-            elif estado == 'seleccion_cancelar':
-                await procesar_seleccion_cancelar(update, context, texto)
-            elif estado == 'seleccion_presupuesto':
-                await procesar_seleccion_presupuesto(update, context, texto)
-            elif estado == 'seleccion_actualizar':
-                await procesar_seleccion_actualizar(update, context, texto)
-            elif estado == 'seleccion_pago':
-                await procesar_seleccion_pago(update, context, texto)
-            elif estado == 'seleccion_fusion':
-                await procesar_seleccion_fusion(update, context, texto)
-            elif estado == 'seleccion_explicar_estado':
-                await procesar_seleccion_explicar_estado(update, context, texto)
-            elif estado == 'esperando_cambio_estado':
-                await procesar_cambio_estado(update, context, texto)
-            elif estado == 'esperando_nuevo_estado':
-                await procesar_nuevo_estado(update, context, texto)
-            elif estado == 'confirmar_cliente_duplicado':
-                await procesar_confirmar_cliente_duplicado(update, context, texto)
-            elif estado == 'esperando_confirmacion_cierre':
-                await procesar_confirmacion_cierre(update, context, texto)
-            elif estado == 'seleccion_cierre':
-                await procesar_seleccion_cierre(update, context, texto)
-            elif estado == 'esperando_monto_cierre':
-                await procesar_monto_cierre(update, context, texto)
-            elif estado == 'esperando_confirmacion_monto_cierre':
-                await procesar_confirmacion_monto_cierre(update, context, texto)
-            else:
-                await procesar_texto(update, context, texto)
-                
         except Exception as e:
             await update.message.reply_text(f"❌ Error de audio: {str(e)[:100]}. Disculpe, jefe.")
+            return
+    else:
+        # No es texto ni voz
+        return
 
-# ==================== FUNCIONES DE ESTADOS ====================
-async def procesar_seleccion_material(update, context, respuesta):
+    # Ahora texto contiene el mensaje (original o transcrito)
+    estado = context.user_data.get('estado_espera')
+
+    # Comando de escape universal
+    if estado and _es_escape(texto):
+        for key in list(context.user_data.keys()):
+            if key not in ('historial', 'cliente_activo', 'ultima_lista'):
+                context.user_data[key] = None
+        context.user_data['estado_espera'] = None
+        await update.message.reply_text("✅ Ok, lo dejo así, jefe. ¿En qué más le ayudo?")
+        return
+
+    # Enrutamiento según el estado de espera
+    if estado == 'esperando_tipo_borrado':
+        await procesar_tipo_borrado(update, context, texto)
+    elif estado == 'esperando_seleccion_borrado':
+        await procesar_seleccion_borrado(update, context, texto)
+    elif estado == 'confirmar_borrado':
+        await procesar_confirmacion_borrado(update, context, texto)
+    elif estado == 'seleccion_material':
+        await procesar_seleccion_material(update, context, texto)
+    elif estado == 'esperando_costo_material':
+        await procesar_costo_material(update, context, texto)
+    elif estado == 'seleccion_cancelar':
+        await procesar_seleccion_cancelar(update, context, texto)
+    elif estado == 'seleccion_presupuesto':
+        await procesar_seleccion_presupuesto(update, context, texto)
+    elif estado == 'seleccion_actualizar':
+        await procesar_seleccion_actualizar(update, context, texto)
+    elif estado == 'seleccion_pago':
+        await procesar_seleccion_pago(update, context, texto)
+    elif estado == 'seleccion_fusion':
+        await procesar_seleccion_fusion(update, context, texto)
+    elif estado == 'seleccion_explicar_estado':
+        await procesar_seleccion_explicar_estado(update, context, texto)
+    elif estado == 'esperando_cambio_estado':
+        await procesar_cambio_estado(update, context, texto)
+    elif estado == 'esperando_nuevo_estado':
+        await procesar_nuevo_estado(update, context, texto)
+    elif estado == 'confirmar_cliente_duplicado':
+        await procesar_confirmar_cliente_duplicado(update, context, texto)
+    elif estado == 'esperando_confirmacion_cierre':
+        await procesar_confirmacion_cierre(update, context, texto)
+    elif estado == 'seleccion_cierre':
+        await procesar_seleccion_cierre(update, context, texto)
+    elif estado == 'esperando_monto_cierre':
+        await procesar_monto_cierre(update, context, texto)
+    elif estado == 'esperando_confirmacion_monto_cierre':
+        await procesar_confirmacion_monto_cierre(update, context, texto)
+    else:
+        # Si no hay estado de espera, procesar como texto libre
+        await procesar_texto(update, context, texto)
+
+# ==================== FUNCIONES DE ESTADOS (con texto como argumento) ====================
+# Estas funciones deben recibir 'texto' y no usar update.message.text
+# (Se mantienen todas iguales, solo se adapta el parámetro)
+
+# Nota: Las funciones que ya estaban definidas con parámetro 'texto' las dejamos igual.
+# Aquí solo incluimos las que faltaban por adaptar. Todas deben tener la misma firma:
+# async def funcion(update, context, texto: str = None)
+
+async def procesar_seleccion_material(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         proyectos = context.user_data.get('proyectos_seleccion', [])
         cliente_nombre = context.user_data.get('cliente_nombre', '')
@@ -1672,11 +1662,11 @@ async def procesar_seleccion_material(update, context, respuesta):
             context.user_data['estado_espera'] = None
             return
         seleccion = None
-        resp_lower = respuesta.lower().strip()
+        resp_lower = texto.lower().strip()
         if resp_lower in ['todos', 'todo', 'ambos', 'todas']:
             seleccion = 'todos'
         else:
-            numero = _es_respuesta_numerica_simple(respuesta)
+            numero = _es_respuesta_numerica_simple(texto)
             if numero is not None and numero.is_integer():
                 idx = int(numero) - 1
                 if 0 <= idx < len(proyectos):
@@ -1721,7 +1711,14 @@ async def procesar_seleccion_material(update, context, respuesta):
         await update.message.reply_text(f"❌ Error en selección: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_costo_material(update, context, respuesta):
+async def procesar_costo_material(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         proyecto_id = context.user_data.get('proyecto_id')
         cliente_nombre = context.user_data.get('cliente_nombre', '')
@@ -1730,7 +1727,7 @@ async def procesar_costo_material(update, context, respuesta):
             context.user_data['estado_espera'] = None
             return
 
-        resp_lower = respuesta.lower().strip()
+        resp_lower = texto.lower().strip()
         if resp_lower.startswith('no'):
             conn = get_db_connection()
             cur = conn.cursor()
@@ -1743,7 +1740,7 @@ async def procesar_costo_material(update, context, respuesta):
             context.user_data['cliente_nombre'] = None
             return
 
-        costo = _es_respuesta_numerica_simple(respuesta)
+        costo = _es_respuesta_numerica_simple(texto)
         if costo is not None:
             conn = get_db_connection()
             cur = conn.cursor()
@@ -1756,27 +1753,35 @@ async def procesar_costo_material(update, context, respuesta):
             context.user_data['cliente_nombre'] = None
             return
 
+        # Si no se pudo extraer un número, limpiar el estado y procesar como nueva instrucción
         context.user_data['estado_espera'] = None
         await update.message.reply_text(
             "🤔 No pude entender el monto. Voy a procesar tu mensaje como nueva instrucción, "
             "pero recuerda que el costo del material sigue pendiente — puedes decírmelo después."
         )
-        await procesar_texto(update, context, respuesta)
+        await procesar_texto(update, context, texto)
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_seleccion_cancelar(update, context, respuesta):
+async def procesar_seleccion_cancelar(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         proyectos = context.user_data.get('proyectos_cancelar', [])
         if not proyectos:
             await update.message.reply_text("⚠️ No tengo proyectos en memoria.")
             context.user_data['estado_espera'] = None
             return
-        resp_lower = respuesta.lower().strip()
+        resp_lower = texto.lower().strip()
         seleccion = None
-        numero = _es_respuesta_numerica_simple(respuesta)
+        numero = _es_respuesta_numerica_simple(texto)
         if numero is not None and numero.is_integer():
             idx = int(numero) - 1
             if 0 <= idx < len(proyectos):
@@ -1809,7 +1814,14 @@ async def procesar_seleccion_cancelar(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_seleccion_presupuesto(update, context, respuesta):
+async def procesar_seleccion_presupuesto(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         candidatos = context.user_data.get('candidatos_presupuesto', [])
         cliente_nombre = context.user_data.get('cliente_presupuesto', '')
@@ -1818,7 +1830,7 @@ async def procesar_seleccion_presupuesto(update, context, respuesta):
             await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        pid = _elegir_candidato(respuesta, candidatos)
+        pid = _elegir_candidato(texto, candidatos)
         if pid is None:
             await update.message.reply_text("⚠️ No entendí, responde con el número o el nombre del proyecto.")
             return
@@ -1847,7 +1859,14 @@ async def procesar_seleccion_presupuesto(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_seleccion_actualizar(update, context, respuesta):
+async def procesar_seleccion_actualizar(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         candidatos = context.user_data.get('candidatos_actualizar', [])
         cliente_nombre = context.user_data.get('cliente_actualizar', '')
@@ -1856,7 +1875,7 @@ async def procesar_seleccion_actualizar(update, context, respuesta):
             await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        pid = _elegir_candidato(respuesta, candidatos)
+        pid = _elegir_candidato(texto, candidatos)
         if pid is None:
             await update.message.reply_text("⚠️ No entendí, responde con el número o el nombre del proyecto.")
             return
@@ -1884,7 +1903,14 @@ async def procesar_seleccion_actualizar(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_seleccion_pago(update, context, respuesta):
+async def procesar_seleccion_pago(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         candidatos = context.user_data.get('candidatos_pago', [])
         cliente_nombre = context.user_data.get('cliente_pago', '')
@@ -1893,7 +1919,7 @@ async def procesar_seleccion_pago(update, context, respuesta):
             await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        pid = _elegir_candidato(respuesta, candidatos)
+        pid = _elegir_candidato(texto, candidatos)
         if pid is None:
             await update.message.reply_text("⚠️ No entendí, responde con el número o el nombre del proyecto.")
             return
@@ -1922,7 +1948,14 @@ async def procesar_seleccion_pago(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_seleccion_fusion(update, context, respuesta):
+async def procesar_seleccion_fusion(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         proyectos = context.user_data.get('proyectos_fusion', [])
         cliente_nombre = context.user_data.get('cliente_fusion', '')
@@ -1930,11 +1963,11 @@ async def procesar_seleccion_fusion(update, context, respuesta):
             await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        resp = respuesta.strip().lower()
+        resp = texto.strip().lower()
         if resp == 'todos':
             ids = [p[0] for p in proyectos]
         else:
-            numeros = re.findall(r'\b\d+\b', respuesta)
+            numeros = re.findall(r'\b\d+\b', resp)
             if not numeros:
                 await update.message.reply_text("⚠️ No entendí. Escribe números separados por comas (ej: 1,2) o 'todos'.")
                 return
@@ -1972,7 +2005,14 @@ async def procesar_seleccion_fusion(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_confirmacion_fusion(update, context, respuesta):
+async def procesar_confirmacion_fusion(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         ids = context.user_data.get('ids_fusion', [])
         cliente_nombre = context.user_data.get('cliente_fusion', '')
@@ -1980,7 +2020,7 @@ async def procesar_confirmacion_fusion(update, context, respuesta):
             await update.message.reply_text("⚠️ No tengo IDs en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        if not _es_confirmacion(respuesta):
+        if not _es_confirmacion(texto):
             await update.message.reply_text("✅ Fusión cancelada, jefe.")
             context.user_data['estado_espera'] = None
             context.user_data['ids_fusion'] = None
@@ -2003,7 +2043,14 @@ async def procesar_confirmacion_fusion(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_seleccion_explicar_estado(update, context, respuesta):
+async def procesar_seleccion_explicar_estado(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         proyectos = context.user_data.get('proyectos_explicar', [])
         cliente_nombre = context.user_data.get('cliente_explicar', '')
@@ -2011,7 +2058,7 @@ async def procesar_seleccion_explicar_estado(update, context, respuesta):
             await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        numero = _es_respuesta_numerica_simple(respuesta)
+        numero = _es_respuesta_numerica_simple(texto)
         if numero is None or not numero.is_integer():
             await update.message.reply_text("⚠️ Responde con el número del proyecto.")
             return
@@ -2042,7 +2089,14 @@ async def procesar_seleccion_explicar_estado(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_cambio_estado(update, context, respuesta):
+async def procesar_cambio_estado(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         cliente_nombre = context.user_data.get('cliente_cambio_estado')
         proyecto_id = context.user_data.get('proyecto_cambio_estado')
@@ -2050,7 +2104,7 @@ async def procesar_cambio_estado(update, context, respuesta):
             await update.message.reply_text("⚠️ No tengo datos en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        if _es_confirmacion(respuesta):
+        if _es_confirmacion(texto):
             await update.message.reply_text(
                 "📋 ¿A qué estado quieres cambiarlo?\n\n"
                 "1. Por cobrar\n"
@@ -2069,7 +2123,14 @@ async def procesar_cambio_estado(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_nuevo_estado(update, context, respuesta):
+async def procesar_nuevo_estado(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         cliente_nombre = context.user_data.get('cliente_cambio_estado')
         proyecto_id = context.user_data.get('proyecto_cambio_estado')
@@ -2083,7 +2144,7 @@ async def procesar_nuevo_estado(update, context, respuesta):
             "3": "Aceptado",
             "4": "Pendiente de cotizar"
         }
-        estado_elegido = mapa_estados.get(respuesta.strip())
+        estado_elegido = mapa_estados.get(texto.strip())
         if not estado_elegido:
             await update.message.reply_text("⚠️ Responde 1, 2, 3 o 4.")
             return
@@ -2100,14 +2161,21 @@ async def procesar_nuevo_estado(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_confirmar_cliente_duplicado(update, context, respuesta):
+async def procesar_confirmar_cliente_duplicado(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         datos = context.user_data.get('datos_cliente_duplicado')
         if not datos:
             await update.message.reply_text("⚠️ No tengo datos en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        if _es_confirmacion(respuesta):
+        if _es_confirmacion(texto):
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("SELECT id FROM clientes WHERE unaccent(nombre) ILIKE unaccent(%s)", (f"%{datos['cliente']}%",))
@@ -2152,8 +2220,15 @@ async def procesar_confirmar_cliente_duplicado(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-# ===== FUNCIONES PARA CIERRE DE PROYECTO =====
-async def procesar_confirmacion_cierre(update, context, respuesta):
+# ===== FUNCIONES PARA CIERRE DE PROYECTO (CORREGIDAS) =====
+async def procesar_confirmacion_cierre(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         proyecto_id = context.user_data.get('cierre_proyecto_id')
         cliente_nombre = context.user_data.get('cierre_cliente')
@@ -2164,12 +2239,13 @@ async def procesar_confirmacion_cierre(update, context, respuesta):
             context.user_data['estado_espera'] = None
             return
 
+        # Limpiar estado ANTES de procesar para evitar bucles
         context.user_data['estado_espera'] = None
         context.user_data['cierre_proyecto_id'] = None
         context.user_data['cierre_cliente'] = None
         context.user_data['cierre_saldo'] = None
 
-        if _es_confirmacion(respuesta):
+        if _es_confirmacion(texto):
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("SELECT monto_total, monto_pagado, nombre_corto FROM proyectos WHERE id = %s", (proyecto_id,))
@@ -2200,7 +2276,14 @@ async def procesar_confirmacion_cierre(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_seleccion_cierre(update, context, respuesta):
+async def procesar_seleccion_cierre(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         proyectos = context.user_data.get('proyectos_cierre', [])
         cliente_nombre = context.user_data.get('cliente_cierre', '')
@@ -2209,7 +2292,7 @@ async def procesar_seleccion_cierre(update, context, respuesta):
             context.user_data['estado_espera'] = None
             return
 
-        numero = _es_respuesta_numerica_simple(respuesta)
+        numero = _es_respuesta_numerica_simple(texto)
         if numero is None or not numero.is_integer():
             await update.message.reply_text("⚠️ Responde con el número del proyecto.")
             return
@@ -2239,7 +2322,14 @@ async def procesar_seleccion_cierre(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_monto_cierre(update, context, respuesta):
+async def procesar_monto_cierre(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         proyecto_id = context.user_data.get('cierre_proyecto_id')
         cliente_nombre = context.user_data.get('cierre_cliente')
@@ -2250,7 +2340,7 @@ async def procesar_monto_cierre(update, context, respuesta):
             context.user_data['estado_espera'] = None
             return
 
-        monto = _es_respuesta_numerica_simple(respuesta)
+        monto = _es_respuesta_numerica_simple(texto)
         if monto is None or monto < 0:
             await update.message.reply_text("⚠️ Responde un monto válido (ej: '2000' o '2500').")
             return
@@ -2264,6 +2354,7 @@ async def procesar_monto_cierre(update, context, respuesta):
             context.user_data['monto_cierre'] = monto
             return
 
+        # Registrar pago parcial
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT monto_pagado, nombre_corto FROM proyectos WHERE id = %s", (proyecto_id,))
@@ -2294,7 +2385,14 @@ async def procesar_monto_cierre(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_confirmacion_monto_cierre(update, context, respuesta):
+async def procesar_confirmacion_monto_cierre(update, context, texto: str = None):
+    if texto is None:
+        if update.message and update.message.text:
+            texto = update.message.text
+        else:
+            await update.message.reply_text("⚠️ No entendí tu respuesta, jefe.")
+            context.user_data['estado_espera'] = None
+            return
     try:
         proyecto_id = context.user_data.get('cierre_proyecto_id')
         cliente_nombre = context.user_data.get('cierre_cliente')
@@ -2305,7 +2403,7 @@ async def procesar_confirmacion_monto_cierre(update, context, respuesta):
             context.user_data['estado_espera'] = None
             return
 
-        if _es_confirmacion(respuesta):
+        if _es_confirmacion(texto):
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("SELECT monto_pagado, nombre_corto FROM proyectos WHERE id = %s", (proyecto_id,))
@@ -2357,11 +2455,4 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("cliente", comando_cliente))
     app.add_handler(CommandHandler("estadisticas", comando_estadisticas))
     app.add_handler(CommandHandler("historial", comando_historial))
-    app.add_handler(CommandHandler("resumen", comando_resumen))
-    app.add_handler(CommandHandler("material", comando_material))
-    app.add_handler(CommandHandler("presupuesto", comando_presupuesto))
-    app.add_handler(CommandHandler("gastos", comando_gastos))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
-    app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot CORREGIDO: routing de voz con estado, eliminada restricción de 3 palabras, y extracción de números mejorada.")
-    app.run_polling(drop_pending_updates=True)
+    app.add_handler(CommandHandler("resumen", comando_resumen
