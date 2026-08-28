@@ -189,7 +189,7 @@ def registrar_gasto(cur, descripcion, monto):
     cur.execute("INSERT INTO gastos (descripcion, monto) VALUES (%s, %s) RETURNING id", (descripcion, monto))
     return cur.fetchone()[0]
 
-# ===== FUNCIÓN DE BORRADO CORREGIDA (IDs numéricos) =====
+# ===== FUNCIONES DE BORRADO CORREGIDAS =====
 def borrar_proyectos_por_ids(cur, ids):
     """Asegura que ids sea una lista de enteros válidos antes de eliminar."""
     ids_int = []
@@ -197,7 +197,7 @@ def borrar_proyectos_por_ids(cur, ids):
         try:
             ids_int.append(int(id_item))
         except (ValueError, TypeError):
-            continue  # Ignora valores no numéricos
+            continue
     if not ids_int:
         return 0
     cur.execute("DELETE FROM proyectos WHERE id = ANY(%s)", (ids_int,))
@@ -213,6 +213,15 @@ def borrar_gastos_por_ids(cur, ids):
     if not ids_int:
         return 0
     cur.execute("DELETE FROM gastos WHERE id = ANY(%s)", (ids_int,))
+    return cur.rowcount
+
+# ===== NUEVA FUNCIÓN: limpiar clientes huérfanos =====
+def limpiar_clientes_huérfanos(cur):
+    """Elimina clientes que no tienen ningún proyecto asociado."""
+    cur.execute("""
+        DELETE FROM clientes 
+        WHERE id NOT IN (SELECT DISTINCT cliente_id FROM proyectos WHERE cliente_id IS NOT NULL)
+    """)
     return cur.rowcount
 
 # ==================== FUNCIONES DE PROYECTOS ====================
@@ -697,7 +706,6 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
     context.user_data['estado_espera'] = 'esperando_seleccion_borrado'
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-# ===== CORRECCIÓN DE BORRADO: extraer solo IDs numéricos =====
 async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     respuesta = update.message.text
     try:
@@ -762,10 +770,17 @@ async def procesar_confirmacion_borrado(update: Update, context: ContextTypes.DE
             borrados = borrar_gastos_por_ids(cur, ids)
         else:
             borrados = borrar_proyectos_por_ids(cur, ids)
+            # Después de borrar proyectos, limpiar clientes huérfanos
+            clientes_eliminados = limpiar_clientes_huérfanos(cur)
         conn.commit()
         cur.close(); conn.close()
 
-        await update.message.reply_text(f"🗑️ {borrados} elementos borrados definitivamente, jefe.")
+        # Mensaje de confirmación
+        msg = f"🗑️ {borrados} elementos borrados definitivamente, jefe."
+        if tipo != 'gastos' and 'clientes_eliminados' in locals() and clientes_eliminados > 0:
+            msg += f"\n🧹 También se eliminaron {clientes_eliminados} clientes sin proyectos."
+
+        await update.message.reply_text(msg)
 
         context.user_data['estado_espera'] = None
         context.user_data['borrar_ids'] = None
@@ -1323,5 +1338,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot 100% IA actualizado y corregido (bug de IDs solucionado).")
+    print("🤖 Bot 100% IA actualizado: borra proyectos y clientes huérfanos automáticamente.")
     app.run_polling(drop_pending_updates=True)
