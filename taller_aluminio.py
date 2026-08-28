@@ -4,6 +4,8 @@ import re
 import logging
 import psycopg2
 from decimal import Decimal
+from datetime import datetime, timedelta
+import pytz
 from openai import OpenAI
 from groq import Groq
 from telegram import Update
@@ -20,21 +22,30 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 groq_client = Groq(api_key=GROQ_API_KEY)
 
+# Zona horaria de México (CDMX)
+ZONA_HORARIA = pytz.timezone('America/Mexico_City')
+
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
+
+def ahora_cdmx():
+    """Devuelve la fecha/hora actual en zona horaria de México (CDMX)."""
+    return datetime.now(ZONA_HORARIA)
 
 # ==================== CONSTANTES PARA VALIDACIONES ====================
 ACCIONES_VALIDAS = {
     "registrar_proyecto", "registrar_pago", "actualizar_proyecto",
     "marcar_presupuesto_enviado", "cancelar_proyecto", "iniciar_borrado",
     "consultar", "consultar_historial", "consultar_material", "consultar_presupuesto",
-    "registrar_compra_material", "registrar_gasto", "consultar_gastos", "preguntar"
+    "registrar_compra_material", "registrar_gasto", "consultar_gastos", "preguntar",
+    "fusionar_proyectos"
 }
 
 ACCIONES_QUE_REQUIEREN_CLIENTE = {
     "registrar_proyecto", "registrar_pago", "actualizar_proyecto",
     "marcar_presupuesto_enviado", "cancelar_proyecto",
-    "consultar_material", "consultar_presupuesto", "registrar_compra_material"
+    "consultar_material", "consultar_presupuesto", "registrar_compra_material",
+    "fusionar_proyectos"
 }
 
 _PALABRAS_PAGO = ("anticipo", "anticipó", "abono", "abonó", "ya pagó", "ya pago", "dio un pago")
@@ -44,9 +55,15 @@ _PALABRAS_ESCAPE = (
     "olvida eso", "cancela eso", "ya no importa", "mejor no", "cancelar todo"
 )
 
+_PALABRAS_CONFIRMACION = ("si", "sí", "yes", "sip", "va", "dale", "adelante", "confirmo", "correcto")
+
+_PALABRAS_DESCRIPCION_TRABAJO = ("ventana", "cancel", "puerta", "medida", "cristal", "aluminio", "barandal", "reja", "domo")
+
+ORDEN_ESTADOS = ["Cancelado", "Pendiente de cotizar", "Presupuesto enviado",
+                  "Aceptado", "En proceso", "Por cobrar", "Liquidado"]
+
 # ==================== FUNCIONES DE VALIDACIÓN Y CORRECCIÓN ====================
 def validar_accion(datos: dict) -> str | None:
-    """Devuelve None si está bien, o un mensaje de error describiendo qué falta."""
     if not isinstance(datos, dict):
         return "la respuesta de la IA no es un objeto JSON válido"
     accion = datos.get("accion")
@@ -62,18 +79,75 @@ def validar_accion(datos: dict) -> str | None:
     return None
 
 def _corregir_accion_con_texto(datos: dict, texto_original: str) -> dict:
-    """Corrige el JSON de la IA cuando el texto del jefe tiene señales inequívocas
-    que la IA pasó por alto (ej. dijo 'anticipo' pero registró un proyecto nuevo)."""
     texto_low = texto_original.lower()
     accion = datos.get("accion")
     if accion == "registrar_proyecto" and any(p in texto_low for p in _PALABRAS_PAGO):
         datos = dict(datos)
         datos["accion"] = "registrar_pago"
+    # Si la acción es actualizar y NO hay señales de descripción de trabajo, forzar descripcion vacía
+    if accion == "actualizar_proyecto" and not _parece_descripcion_de_trabajo(texto_original):
+        datos = dict(datos)
+        datos["descripcion"] = ""
     return datos
 
 def _es_escape(texto: str) -> bool:
     t = texto.lower().strip()
     return t in _PALABRAS_ESCAPE or any(t.startswith(p) for p in _PALABRAS_ESCAPE)
+
+def _es_confirmacion(texto: str) -> bool:
+    t = texto.strip().lower()
+    return any(t == p or t.startswith(p + " ") or t.startswith(p + ",") for p in _PALABRAS_CONFIRMACION)
+
+def _es_respuesta_numerica_simple(texto: str) -> float | None:
+    """Devuelve el número si el mensaje ES una respuesta numérica corta
+    (ej: '4500', '$4,500', '4500 pesos'), o None si es una frase con otro
+    propósito (aunque contenga dígitos, como una corrección o descripción)."""
+    t = texto.strip().lower()
+    t_limpio = t.replace('$', '').replace(',', '').replace('pesos', '').replace('peso', '').strip()
+    palabras = t_limpio.split()
+    if len(palabras) == 0 or len(palabras) > 2:
+        return None
+    try:
+        return float(palabras[0])
+    except ValueError:
+        return None
+
+def _parece_descripcion_de_trabajo(texto_original: str) -> bool:
+    t = texto_original.lower()
+    return any(p in t for p in _PALABRAS_DESCRIPCION_TRABAJO)
+
+# ==================== ÚLTIMA LISTA (numeración persistente) ====================
+def _guardar_ultima_lista(context, items, tipo="proyectos"):
+    """items: lista de tuplas (id, cliente, nombre_corto, descripcion, monto, estado)
+    en el mismo orden en que se mostraron numeradas al jefe."""
+    context.user_data['ultima_lista'] = {
+        'tipo': tipo,
+        'items': items,
+        'timestamp': ahora_cdmx().isoformat()
+    }
+
+def _resolver_numero_de_ultima_lista(context, texto: str):
+    """Si el texto menciona un número pequeño y hay una lista reciente (< 10 min),
+    devuelve el id correspondiente. Si no aplica, devuelve None."""
+    ultima = context.user_data.get('ultima_lista')
+    if not ultima:
+        return None
+    try:
+        ts = datetime.fromisoformat(ultima['timestamp'])
+        if (ahora_cdmx() - ts).total_seconds() > 600:  # 10 minutos de vigencia
+            return None
+    except Exception:
+        return None
+    numeros = re.findall(r'\b(\d+)\b', texto)
+    if len(numeros) != 1:
+        return None
+    idx = int(numeros[0]) - 1
+    items = ultima['items']
+    if 0 <= idx < len(items):
+        return items[idx][0]
+    return None
+
+_PATRON_EDITAR_POR_NUMERO = re.compile(r'\b(edita|cambia|actualiza|el)\s+(?:el\s+)?(?:proyecto\s+)?(\d+)\b')
 
 # ==================== INTELIGENCIA ARTIFICIAL ====================
 def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_existentes=""):
@@ -110,25 +184,24 @@ CLIENTES REGISTRADOS (usa estos nombres EXACTOS cuando reconozcas a un cliente):
 
 REGLAS ESTRICTAS:
 1. **REGISTRO DE CLIENTE**: Cuando el jefe diga "registra a [nombre]", extrae toda la información que puedas: dirección, teléfono, trabajo, monto (si lo da). Si falta el monto del presupuesto, pregunta una sola vez. Si el jefe responde "pendiente", "no sé" o similar, guarda con monto 0.
-2. **NOMBRE DEL PROYECTO (campo `nombre_corto`)**: Debe ser el NOMBRE DEL TRABAJO específico, NO el nombre del cliente. Ejemplos: "Ventana aluminio blanco", "Cancel baño", "3 ventanas negras". Si el jefe no lo especifica, infiere un nombre corto del trabajo a partir de la descripción.
-3. **PRESUPUESTO ENVIADO**: Cuando el jefe diga "ya mandé presupuesto", "entregué presupuesto", "ya cotice", etc., DEBES interpretar que también puede venir un monto y una descripción del trabajo en el mismo mensaje. Ej: "ya envie presupuesto a abigail de 10000 pesos, son 3 ventanas de aluminio negro con cristal claro" → eso es una sola acción: marcar presupuesto enviado Y actualizar el monto a 10000 Y actualizar la descripción del proyecto.
-4. **ACTUALIZACIONES**: Si el jefe actualiza el monto, la descripción o cualquier dato, debes usar la acción correspondiente (actualizar_proyecto) y pasar todos los campos que se mencionan.
+2. **NOMBRE DEL PROYECTO (campo `nombre_corto`)**: Debe ser el NOMBRE DEL TRABAJO específico, NO el nombre del cliente. Ejemplos: "Ventana aluminio blanco", "Cancel baño", "3 ventanas negras".
+3. **PRESUPUESTO ENVIADO**: Cuando el jefe diga "ya mandé presupuesto", incluye el monto si lo da. **NO reescribas el campo "descripcion" solo porque mencionó un monto** — la descripción es el TRABAJO (materiales, medidas, tipo de pieza). Deja "descripcion" vacía en el JSON a menos que el jefe esté describiendo el trabajo en ese mismo mensaje.
+4. **ACTUALIZACIONES**: Si el jefe actualiza el monto, la descripción o cualquier dato, usa "actualizar_proyecto".
 5. **CONSULTAS**: "qué clientes tengo" → "consultar" tipo "activos". "liquidados" → "liquidados". "cancelados" → "cancelados".
 6. **BORRAR**: "borra", "elimina", "quiero eliminar clientes" → "iniciar_borrado".
 7. **GASTOS**: "gasté" sin cliente → "registrar_gasto". "gastos" → "consultar_gastos".
 8. **CONFIRMACIONES**: "si", "sí", "esta bien" → NO crees nuevo proyecto, solo confirma lo anterior.
+9. **FUSIONAR**: "fusiona", "combina", "une" + proyectos del mismo cliente → "fusionar_proyectos".
 
-Responde SOLO con este JSON (nota que "acciones" es una LISTA; casi siempre tendrá un
-solo elemento, pero puede tener varios si el jefe dio varias instrucciones distintas en
-el mismo mensaje):
+Responde SOLO con este JSON (nota que "acciones" es una LISTA):
 {{
   "acciones": [
     {{
-      "accion": "registrar_proyecto" | "registrar_pago" | "actualizar_proyecto" | "marcar_presupuesto_enviado" | "cancelar_proyecto" | "iniciar_borrado" | "consultar" | "consultar_historial" | "consultar_material" | "consultar_presupuesto" | "registrar_compra_material" | "registrar_gasto" | "consultar_gastos" | "preguntar",
-      "cliente": "nombre (normalizado a minúsculas)",
+      "accion": "registrar_proyecto" | "registrar_pago" | "actualizar_proyecto" | "marcar_presupuesto_enviado" | "cancelar_proyecto" | "iniciar_borrado" | "consultar" | "consultar_historial" | "consultar_material" | "consultar_presupuesto" | "registrar_compra_material" | "registrar_gasto" | "consultar_gastos" | "fusionar_proyectos" | "preguntar",
+      "cliente": "nombre",
       "nombre_corto": "nombre breve del TRABAJO (ej: 'ventana aluminio', 'cancel baño')",
       "monto": numero o 0,
-      "descripcion": "detalles completos",
+      "descripcion": "detalles completos del trabajo (solo si se describen en este mensaje)",
       "notas": "",
       "telefono": "",
       "direccion": "",
@@ -159,7 +232,6 @@ Responde ÚNICAMENTE con el JSON."""
     except json.JSONDecodeError:
         return {"acciones": [{"accion": "preguntar", "pregunta": "No entendí bien, ¿puedes repetirlo, jefe?"}]}
 
-    # Validación y reintento automático
     acciones_a_validar = resultado.get("acciones") or [resultado]
     errores = [validar_accion(a) for a in acciones_a_validar]
     errores = [e for e in errores if e]
@@ -303,6 +375,46 @@ def borrar_gastos_por_ids(cur, ids):
     cur.execute("DELETE FROM gastos WHERE id = ANY(%s)", (ids_int,))
     return cur.rowcount
 
+def fusionar_proyectos(cur, ids: list[int]):
+    """Combina 2+ proyectos en uno solo."""
+    if len(ids) < 2:
+        return None, "Necesito al menos 2 proyectos para fusionar."
+    cur.execute("""
+        SELECT id, nombre_corto, descripcion, monto_total, monto_pagado, estado,
+               material_comprado, costo_material, presupuesto_enviado, fecha_presupuesto,
+               fecha_creacion, cliente_id
+        FROM proyectos WHERE id = ANY(%s) ORDER BY fecha_creacion ASC
+    """, (ids,))
+    filas = cur.fetchall()
+    if len(filas) != len(ids):
+        return None, "Alguno de esos proyectos ya no existe."
+    if len(set(f[11] for f in filas)) > 1:
+        return None, "Esos proyectos son de clientes distintos, no se pueden fusionar."
+    base = filas[0]
+    base_id = base[0]
+    nombre_corto = base[1] or next((f[1] for f in filas if f[1]), 'Proyecto General')
+    descripcion = " | ".join(dict.fromkeys(f[2] for f in filas if f[2]))
+    monto_total = sum(Decimal(str(f[3])) for f in filas)
+    monto_pagado = sum(Decimal(str(f[4])) for f in filas)
+    estado_final = max((f[5] for f in filas), key=lambda e: ORDEN_ESTADOS.index(e) if e in ORDEN_ESTADOS else 0)
+    material_comprado = any(f[6] for f in filas)
+    costo_material = sum(Decimal(str(f[7])) for f in filas if f[7]) or None
+    presupuesto_enviado = any(f[8] for f in filas)
+    fecha_presupuesto = max((f[9] for f in filas if f[9]), default=None)
+    cur.execute("""
+        UPDATE proyectos SET
+            nombre_corto = %s, descripcion = %s, monto_total = %s, monto_pagado = %s,
+            estado = %s, material_comprado = %s, costo_material = %s,
+            presupuesto_enviado = %s, fecha_presupuesto = %s
+        WHERE id = %s
+    """, (nombre_corto, descripcion, float(monto_total), float(monto_pagado), estado_final,
+          material_comprado, float(costo_material) if costo_material else None,
+          presupuesto_enviado, fecha_presupuesto, base_id))
+    ids_a_borrar = [f[0] for f in filas if f[0] != base_id]
+    if ids_a_borrar:
+        cur.execute("DELETE FROM proyectos WHERE id = ANY(%s)", (ids_a_borrar,))
+    return base_id, f"Fusionados {len(filas)} proyectos en uno: '{nombre_corto}' — Total: ${float(monto_total):.2f}, Pagado: ${float(monto_pagado):.2f}, Estado: {estado_final}"
+
 # ==================== FUNCIONES DE PROYECTOS ====================
 def obtener_proyectos_activos(cur, cliente_nombre):
     cliente_nombre = cliente_nombre.lower().strip()
@@ -368,15 +480,23 @@ def resolver_proyecto_activo(cur, cliente_nombre, referencia):
         return activos[0][0], []
     return None, activos
 
-def actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, estado, notas="", presupuesto_enviado=None):
+def actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, estado, notas="", presupuesto_enviado=None, proyecto_id_forced=None):
     cliente_nombre = cliente_nombre.lower().strip()
-    proyecto_id, candidatos = resolver_proyecto_activo(cur, cliente_nombre, nombre_corto or descripcion)
+    if proyecto_id_forced:
+        proyecto_id = proyecto_id_forced
+        candidatos = []
+    else:
+        proyecto_id, candidatos = resolver_proyecto_activo(cur, cliente_nombre, nombre_corto or descripcion)
     if proyecto_id is None:
         return False, candidatos
-    updates = ["nombre_corto = COALESCE(%s, nombre_corto)", "descripcion = COALESCE(%s, descripcion)",
+    updates = ["nombre_corto = COALESCE(%s, nombre_corto)",
                "monto_total = CASE WHEN %s > 0 THEN %s ELSE monto_total END",
                "estado = COALESCE(%s, estado)", "notas_adicionales = COALESCE(%s, notas_adicionales)"]
-    params = [nombre_corto or None, descripcion or None, monto, monto, estado or None, notas or None]
+    params = [nombre_corto or None, monto, monto, estado or None, notas or None]
+    # Solo actualizar descripcion si vino con contenido (no vacío)
+    if descripcion and descripcion.strip():
+        updates.append("descripcion = COALESCE(%s, descripcion)")
+        params.append(descripcion)
     if presupuesto_enviado is not None:
         updates.append("presupuesto_enviado = %s")
         params.append(presupuesto_enviado)
@@ -402,7 +522,7 @@ def marcar_presupuesto_enviado(cur, cliente_nombre, nombre_corto, monto=None, de
     if monto is not None and monto > 0:
         updates.append("monto_total = %s")
         params.append(monto)
-    if descripcion:
+    if descripcion and descripcion.strip():
         updates.append("descripcion = COALESCE(%s, descripcion)")
         params.append(descripcion)
     if notas:
@@ -431,10 +551,7 @@ def cancelar_proyecto_especifico(cur, cliente_nombre, nombre_corto):
         return True
     return False
 
-# ===== REGISTRAR PAGO (MEJORADO CON DESAMBIGUACIÓN) =====
 def registrar_pago(cur, cliente_nombre, monto_pago, referencia=""):
-    """Ahora devuelve (proyecto_id, mensaje, candidatos).
-    Si candidatos no está vacío, hay que preguntar cuál proyecto antes de aplicar el pago."""
     cliente_nombre = cliente_nombre.lower().strip()
     monto_pago = Decimal(str(monto_pago))
     proyecto_id, candidatos = resolver_proyecto_activo(cur, cliente_nombre, referencia)
@@ -565,9 +682,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Hable conmigo como lo haría con su asistente.\n"
         "Ejemplos:\n"
         "- 'Registra a Juan Pérez, calle siempre viva 123, tel 5551234, 2 ventanas negras'\n"
-        "- 'El presupuesto es de 8000' (si ya registró el cliente)\n"
-        "- 'Ya mandé presupuesto a Juan por 8000, son 3 ventanas blancas'\n"
+        "- 'El presupuesto es de 8000'\n"
+        "- 'Ya mandé presupuesto a Juan por 8000'\n"
         "- 'Quiero eliminar clientes'\n"
+        "- 'Fusiona los proyectos 1 y 2 de Juan'\n"
         "Si no tiene el presupuesto, diga 'pendiente' y lo guardo igual."
     )
 
@@ -729,7 +847,7 @@ async def comando_gastos(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         msg = "🧾 **ÚLTIMOS GASTOS:**\n\n"
         for gid, desc, monto, fecha in gastos[:10]:
-            fecha_str = fecha.strftime("%d/%m %H:%M")
+            fecha_str = fecha.strftime("%d/%m %H:%M") if fecha else "Fecha desconocida"
             msg += f"💸 {fecha_str} | ${monto:.2f} - {desc}\n"
         await update.message.reply_text(msg)
     except Exception as e:
@@ -760,7 +878,7 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
             return
         msg = "💸 **GASTOS** (elige números separados por comas, o 'todos'):\n\n"
         for idx, (gid, desc, monto, fecha) in enumerate(items, 1):
-            fecha_str = fecha.strftime("%d/%m %H:%M")
+            fecha_str = fecha.strftime("%d/%m %H:%M") if fecha else "Fecha desconocida"
             msg += f"{idx}. 💸 {fecha_str} | ${monto:.2f} - {desc}\n"
         context.user_data['borrar_tipo'] = 'gastos'
         context.user_data['borrar_items'] = items
@@ -806,16 +924,12 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
             if cliente:
                 await update.message.reply_text(
                     f"📭 No encontré proyectos {label} para {cliente}, jefe.\n\n"
-                    f"Estados reales en la BD: {', '.join(estados_reales) if estados_reales else 'ninguno'}\n"
-                    f"Busca: {label} -> "
-                    f"{'activos = estados que no son Liquidado ni Cancelado' if label == 'activos' else label}"
+                    f"Estados reales en la BD: {', '.join(estados_reales) if estados_reales else 'ninguno'}"
                 )
             else:
                 await update.message.reply_text(
                     f"📭 No hay proyectos {label} para borrar, jefe.\n\n"
-                    f"Estados reales en la BD: {', '.join(estados_reales) if estados_reales else 'ninguno'}\n"
-                    f"Busca: {label} -> "
-                    f"{'activos = estados que no son Liquidado ni Cancelado' if label == 'activos' else label}"
+                    f"Estados reales en la BD: {', '.join(estados_reales) if estados_reales else 'ninguno'}"
                 )
             return
 
@@ -829,6 +943,7 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
 
         context.user_data['borrar_tipo'] = 'proyectos'
         context.user_data['borrar_items'] = items
+        _guardar_ultima_lista(context, items, tipo="borrar")
 
     context.user_data['estado_espera'] = 'esperando_seleccion_borrado'
     await update.message.reply_text(msg, parse_mode='Markdown')
@@ -847,18 +962,29 @@ async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAU
         if resp == 'todos':
             ids = [int(item[0]) for item in items if str(item[0]).isdigit()]
         else:
-            numeros = re.findall(r'\d+', resp)
-            if not numeros:
-                await update.message.reply_text("⚠️ No entendí. Escribe números separados por comas (ej: 1,3,5) o 'todos'.")
-                return
-            indices = [int(n) for n in numeros if 1 <= int(n) <= len(items)]
-            if not indices:
-                await update.message.reply_text("⚠️ Números fuera de rango. Intenta de nuevo.")
-                return
-            ids = [int(items[i-1][0]) for i in indices if str(items[i-1][0]).isdigit()]
+            # Usar _es_respuesta_numerica_simple para evitar números falsos
+            numero = _es_respuesta_numerica_simple(respuesta)
+            if numero is not None and numero.is_integer():
+                idx = int(numero) - 1
+                if 0 <= idx < len(items):
+                    ids = [int(items[idx][0])]
+                else:
+                    await update.message.reply_text("⚠️ Número fuera de rango. Intenta de nuevo.")
+                    return
+            else:
+                # Intentar con comas
+                numeros = re.findall(r'\b\d+\b', respuesta)
+                if not numeros:
+                    await update.message.reply_text("⚠️ No entendí. Escribe números separados por comas (ej: 1,3,5) o 'todos'.")
+                    return
+                indices = [int(n) for n in numeros if 1 <= int(n) <= len(items)]
+                if not indices:
+                    await update.message.reply_text("⚠️ Números fuera de rango. Intenta de nuevo.")
+                    return
+                ids = [int(items[i-1][0]) for i in indices if str(items[i-1][0]).isdigit()]
 
         if not ids:
-            await update.message.reply_text("⚠️ No se pudieron extraer IDs válidos. Asegúrate de elegir elementos de la lista.")
+            await update.message.reply_text("⚠️ No se pudieron extraer IDs válidos.")
             return
 
         context.user_data['borrar_ids'] = ids
@@ -883,7 +1009,7 @@ async def procesar_confirmacion_borrado(update: Update, context: ContextTypes.DE
             context.user_data['estado_espera'] = None
             return
 
-        if respuesta.strip().upper() not in ['SÍ', 'SI']:
+        if not _es_confirmacion(respuesta):
             await update.message.reply_text("✅ Borrado cancelado, jefe.")
             context.user_data['estado_espera'] = None
             context.user_data['borrar_ids'] = None
@@ -1009,6 +1135,9 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
                 msg += f"   📌 Notas: {notas}\n"
             msg += f"   💰 Total: ${t:.2f} | Pagado: ${p:.2f} | Saldo: ${pendiente:.2f}\n"
             msg += f"   📌 Estado: {e} | {pres_icon} Presupuesto | {mat_icon} Material\n\n"
+        # Guardar lista para edición por número
+        items_guardar = [(p[1] if len(p)>1 else None, p[0] if len(p)>0 else None, p[1] if len(p)>1 else None, p[2] if len(p)>2 else None, p[3] if len(p)>3 else None, p[5] if len(p)>5 else None) for p in proyectos]
+        _guardar_ultima_lista(context, items_guardar, tipo="consulta")
         await update.message.reply_text(msg, parse_mode='Markdown')
         return False
 
@@ -1032,8 +1161,35 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
     if cliente_nombre != "Desconocido" and cliente_nombre != cliente_activo:
         context.user_data['cliente_activo'] = cliente_nombre.lower()
 
+    # Verificar si hay un proyecto forzado por número de la última lista
+    proyecto_id_forzado = context.user_data.get('proyecto_id_forzado')
+    if proyecto_id_forzado:
+        # Usamos ese ID para actualizar directamente
+        pass
+
     conn = get_db_connection()
     cur = conn.cursor()
+
+    # ===== FUSIONAR PROYECTOS =====
+    if accion == "fusionar_proyectos":
+        if not cliente_nombre or cliente_nombre == "Desconocido":
+            cur.close(); conn.close()
+            await update.message.reply_text("⚠️ ¿De qué cliente quieres fusionar proyectos, jefe?")
+            return True
+        proyectos = obtener_proyectos_activos(cur, cliente_nombre)
+        cur.close(); conn.close()
+        if len(proyectos) < 2:
+            await update.message.reply_text(f"⚠️ {cliente_nombre} no tiene 2+ proyectos activos para fusionar, jefe.")
+            return False
+        msg = f"🔗 **{cliente_nombre}** tiene estos proyectos activos. ¿Cuáles fusiono?\n\n"
+        for i, p in enumerate(proyectos, 1):
+            msg += f"{i}. *{p[1] or 'Proyecto'}* - ${p[3]:.2f} ({p[5]})\n"
+        msg += "\nResponde los números separados por comas (ej: 1,2) o 'todos'."
+        context.user_data['estado_espera'] = 'seleccion_fusion'
+        context.user_data['proyectos_fusion'] = proyectos
+        context.user_data['cliente_fusion'] = cliente_nombre
+        await update.message.reply_text(msg, parse_mode='Markdown')
+        return True
 
     # ===== MARCAR PRESUPUESTO ENVIADO =====
     if accion == "marcar_presupuesto_enviado":
@@ -1089,7 +1245,9 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
     # ===== ACTUALIZAR PROYECTO =====
     if accion == "actualizar_proyecto":
         buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
-        actualizado, candidatos = actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, estado, notas)
+        actualizado, candidatos = actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, estado, notas, proyecto_id_forced=proyecto_id_forzado)
+        if proyecto_id_forzado:
+            context.user_data['proyecto_id_forzado'] = None
         if actualizado:
             respuesta = f"✏️ Proyecto actualizado, patrón: {resumen_ia}"
             conn.commit(); cur.close(); conn.close()
@@ -1144,7 +1302,7 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
             await update.message.reply_text(msg, parse_mode='Markdown')
             return True
 
-    # ===== REGISTRAR PAGO (mejorado con desambiguación) =====
+    # ===== REGISTRAR PAGO =====
     if accion == "registrar_pago":
         buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion)
         proyecto_id, msg_pago, candidatos = registrar_pago(cur, cliente_nombre, monto, nombre_corto or descripcion)
@@ -1228,13 +1386,19 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
             historial = historial[-15:]
         context.user_data['historial'] = historial
 
+        # Verificar si hay un patrón de edición por número antes de llamar a la IA
+        match = _PATRON_EDITAR_POR_NUMERO.search(texto_original.lower())
+        if match:
+            proyecto_id = _resolver_numero_de_ultima_lista(context, texto_original)
+            if proyecto_id:
+                context.user_data['proyecto_id_forzado'] = proyecto_id
+
         datos_completo = analizar_con_ia(texto_original, historial, cliente_activo, "")
 
         acciones = datos_completo.get("acciones")
         if not isinstance(acciones, list) or not acciones:
-            acciones = [datos_completo]  # compatibilidad con el formato viejo
+            acciones = [datos_completo]
 
-        # Corrección de anticipo/pago basada en texto original
         acciones = [_corregir_accion_con_texto(a, texto_original) for a in acciones]
 
         resumen_log = ", ".join(f"{a.get('accion','?')}" for a in acciones)
@@ -1245,22 +1409,21 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
             cliente_activo = context.user_data.get('cliente_activo', cliente_activo)
             detener = await ejecutar_una_accion(datos, update, context, cliente_activo)
             if detener:
-                break  # se detiene si alguna acción hizo una pregunta o quedó esperando algo
+                break
 
     except Exception as e:
         logging.error(f"🔴 Error: {e}")
         await update.message.reply_text(f"❌ Error interno: {str(e)[:150]}. Lo siento, jefe.")
 
-# ==================== MANEJO DE MENSAJES (CON ESCAPE) ====================
+# ==================== MANEJO DE MENSAJES ====================
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
         texto = update.message.text
         estado = context.user_data.get('estado_espera')
 
-        # Comando de escape universal
         if estado and _es_escape(texto):
             for key in list(context.user_data.keys()):
-                if key not in ('historial', 'cliente_activo'):
+                if key not in ('historial', 'cliente_activo', 'ultima_lista'):
                     context.user_data[key] = None
             context.user_data['estado_espera'] = None
             await update.message.reply_text("✅ Ok, lo dejo así, jefe. ¿En qué más le ayudo?")
@@ -1284,6 +1447,8 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await procesar_seleccion_actualizar(update, context, texto)
         elif estado == 'seleccion_pago':
             await procesar_seleccion_pago(update, context, texto)
+        elif estado == 'seleccion_fusion':
+            await procesar_seleccion_fusion(update, context, texto)
         else:
             await procesar_texto(update, context, texto)
     elif update.message.voice:
@@ -1294,7 +1459,6 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await file.download_to_drive(ruta)
             texto = transcribir_audio(ruta)
             os.remove(ruta)
-            # Si la transcripción es muy corta o vacía, pedir que repita
             if len(texto.strip().split()) < 3:
                 await update.message.reply_text("🎙️ No entendí bien el audio, ¿puedes repetirlo, jefe?")
                 return
@@ -1303,7 +1467,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"❌ Error de audio: {str(e)[:100]}. Disculpe, jefe.")
 
-# ==================== FUNCIONES DE ESTADOS (reutilizadas) ====================
+# ==================== FUNCIONES DE ESTADOS ====================
 async def procesar_seleccion_material(update, context, respuesta):
     try:
         proyectos = context.user_data.get('proyectos_seleccion', [])
@@ -1318,12 +1482,12 @@ async def procesar_seleccion_material(update, context, respuesta):
         if resp_lower in ['todos', 'todo', 'ambos', 'todas']:
             seleccion = 'todos'
         else:
-            try:
-                num = int(resp_lower)
-                if 1 <= num <= len(proyectos):
-                    seleccion = num
-            except ValueError:
-                pass
+            # Usar _es_respuesta_numerica_simple
+            numero = _es_respuesta_numerica_simple(respuesta)
+            if numero is not None and numero.is_integer():
+                idx = int(numero) - 1
+                if 0 <= idx < len(proyectos):
+                    seleccion = idx + 1
             if seleccion is None:
                 for i, (pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat, pres_comp, fecha_pres) in enumerate(proyectos, 1):
                     if nc and nc.lower() in resp_lower:
@@ -1381,9 +1545,8 @@ async def procesar_costo_material(update, context, respuesta):
             cur.close(); conn.close()
             await update.message.reply_text("✅ Material marcado como comprado sin costo, jefe.")
         else:
-            numeros = re.findall(r'\d+', respuesta)
-            if numeros:
-                costo = float(numeros[0])
+            costo = _es_respuesta_numerica_simple(respuesta)
+            if costo is not None:
                 conn = get_db_connection()
                 cur = conn.cursor()
                 marcar_material_comprado(cur, proyecto_id, costo)
@@ -1391,7 +1554,13 @@ async def procesar_costo_material(update, context, respuesta):
                 cur.close(); conn.close()
                 await update.message.reply_text(f"✅ Material marcado con costo de ${costo:.2f}, jefe.")
             else:
-                await update.message.reply_text("🤔 No entendí. Responde el monto (ej: 4500) o 'no' para saltarlo.")
+                # No es un número simple: probablemente el jefe cambió de tema
+                await update.message.reply_text(
+                    "🤔 Eso no es un monto. Voy a procesar tu mensaje como una nueva "
+                    "instrucción, pero recuerda que sigo esperando el costo del "
+                    "material — dímelo cuando puedas."
+                )
+                await procesar_texto(update, context, respuesta)
                 return
         context.user_data['estado_espera'] = None
         context.user_data['proyecto_id'] = None
@@ -1409,12 +1578,11 @@ async def procesar_seleccion_cancelar(update, context, respuesta):
             return
         resp_lower = respuesta.lower().strip()
         seleccion = None
-        try:
-            num = int(resp_lower)
-            if 1 <= num <= len(proyectos):
-                seleccion = num
-        except ValueError:
-            pass
+        numero = _es_respuesta_numerica_simple(respuesta)
+        if numero is not None and numero.is_integer():
+            idx = int(numero) - 1
+            if 0 <= idx < len(proyectos):
+                seleccion = idx + 1
         if seleccion is None:
             for i, (pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat, pres_comp, fecha_pres) in enumerate(proyectos, 1):
                 if nc and nc.lower() in resp_lower:
@@ -1556,17 +1724,106 @@ async def procesar_seleccion_pago(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
+async def procesar_seleccion_fusion(update, context, respuesta):
+    try:
+        proyectos = context.user_data.get('proyectos_fusion', [])
+        cliente_nombre = context.user_data.get('cliente_fusion', '')
+        if not proyectos:
+            await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+        resp = respuesta.strip().lower()
+        if resp == 'todos':
+            ids = [p[0] for p in proyectos]
+        else:
+            numeros = re.findall(r'\b\d+\b', respuesta)
+            if not numeros:
+                await update.message.reply_text("⚠️ No entendí. Escribe números separados por comas (ej: 1,2) o 'todos'.")
+                return
+            indices = [int(n) for n in numeros if 1 <= int(n) <= len(proyectos)]
+            if not indices:
+                await update.message.reply_text("⚠️ Números fuera de rango. Intenta de nuevo.")
+                return
+            ids = [proyectos[i-1][0] for i in indices if str(proyectos[i-1][0]).isdigit()]
+        if len(ids) < 2:
+            await update.message.reply_text("⚠️ Necesito al menos 2 proyectos para fusionar.")
+            return
+        # Mostrar vista previa y pedir confirmación
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT nombre_corto, descripcion, monto_total, monto_pagado, estado
+            FROM proyectos WHERE id = ANY(%s)
+        """, (ids,))
+        filas = cur.fetchall()
+        cur.close(); conn.close()
+        if len(filas) < 2:
+            await update.message.reply_text("⚠️ Algunos proyectos ya no existen.")
+            return
+        preview = "🔗 **VISTA PREVIA DE FUSIÓN:**\n\n"
+        total_monto = sum(f[2] for f in filas)
+        total_pagado = sum(f[3] for f in filas)
+        for i, f in enumerate(filas, 1):
+            preview += f"{i}. {f[0] or 'Proyecto'} - ${f[2]:.2f} ({f[4]})\n"
+        preview += f"\n📊 Total: ${total_monto:.2f} | Pagado: ${total_pagado:.2f} | Saldo: ${total_monto - total_pagado:.2f}"
+        preview += "\n\n⚠️ ¿Confirmas la fusión? Responde 'SÍ' para ejecutar."
+        context.user_data['estado_espera'] = 'confirmar_fusion'
+        context.user_data['ids_fusion'] = ids
+        context.user_data['cliente_fusion'] = cliente_nombre
+        await update.message.reply_text(preview, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
+async def procesar_confirmacion_fusion(update, context, respuesta):
+    try:
+        ids = context.user_data.get('ids_fusion', [])
+        cliente_nombre = context.user_data.get('cliente_fusion', '')
+        if not ids:
+            await update.message.reply_text("⚠️ No tengo IDs en memoria, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+        if not _es_confirmacion(respuesta):
+            await update.message.reply_text("✅ Fusión cancelada, jefe.")
+            context.user_data['estado_espera'] = None
+            context.user_data['ids_fusion'] = None
+            context.user_data['cliente_fusion'] = None
+            return
+        conn = get_db_connection()
+        cur = conn.cursor()
+        proyecto_id, msg = fusionar_proyectos(cur, ids)
+        if proyecto_id:
+            conn.commit()
+            cur.close(); conn.close()
+            await update.message.reply_text(f"✅ {msg}")
+        else:
+            cur.close(); conn.close()
+            await update.message.reply_text(f"⚠️ {msg}")
+        context.user_data['estado_espera'] = None
+        context.user_data['ids_fusion'] = None
+        context.user_data['cliente_fusion'] = None
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
 def _elegir_candidato(respuesta, candidatos):
     resp_lower = respuesta.lower().strip()
-    try:
-        num = int(resp_lower)
-        if 1 <= num <= len(candidatos):
-            return candidatos[num - 1][0]
-    except ValueError:
-        pass
+    # Intentar primero como número simple
+    numero = _es_respuesta_numerica_simple(respuesta)
+    if numero is not None and numero.is_integer():
+        idx = int(numero) - 1
+        if 0 <= idx < len(candidatos):
+            return candidatos[idx][0]
+    # Luego por nombre
     for pid, nc in candidatos:
         if nc and nc.lower() in resp_lower:
             return pid
+    # Finalmente buscar número en toda la frase
+    numeros = re.findall(r'\b\d+\b', respuesta)
+    if len(numeros) == 1:
+        idx = int(numeros[0]) - 1
+        if 0 <= idx < len(candidatos):
+            return candidatos[idx][0]
     return None
 
 # ==================== INICIO ====================
@@ -1582,5 +1839,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot COMPLETO: todas las mejoras de Claude aplicadas.")
+    print("🤖 Bot CORREGIDO: zona horaria CDMX, todas las mejoras de Claude implementadas.")
     app.run_polling(drop_pending_updates=True)
