@@ -51,7 +51,8 @@ ACCIONES_QUE_REQUIEREN_CLIENTE = {
     "fusionar_proyectos", "explicar_estado"
 }
 
-_PALABRAS_PAGO = ("anticipo", "anticipó", "abono", "abonó", "ya pagó", "ya pago", "dio un pago")
+_PALABRAS_PAGO = ("anticipo", "anticipó", "abono", "abonó", "ya pagó", "ya pago", "dio un pago",
+                  "me pagó", "me pago", "me pagaron", "pagó", "pago")
 
 _PALABRAS_ESCAPE = (
     "olvidalo", "olvídalo", "cancelar eso", "ya no", "déjalo", "dejalo",
@@ -61,8 +62,6 @@ _PALABRAS_ESCAPE = (
 _PALABRAS_CONFIRMACION = ("si", "sí", "yes", "sip", "va", "dale", "adelante", "confirmo", "correcto")
 
 _PALABRAS_DESCRIPCION_TRABAJO = ("ventana", "cancel", "puerta", "medida", "cristal", "aluminio", "barandal", "reja", "domo")
-
-_PALABRAS_ESTADO = ("liquidado", "cancelado", "aceptado", "proceso", "pendiente", "presupuesto")
 
 ORDEN_ESTADOS = ["Cancelado", "Pendiente de cotizar", "Presupuesto enviado",
                   "Aceptado", "En proceso", "Por cobrar", "Liquidado"]
@@ -84,14 +83,24 @@ def validar_accion(datos: dict) -> str | None:
     return None
 
 def _corregir_accion_con_texto(datos: dict, texto_original: str) -> dict:
+    """Corrige el JSON de la IA basado en el texto original."""
     texto_low = texto_original.lower()
     accion = datos.get("accion")
+    
+    # Si el usuario dice "ya me pagó" pero la IA registró proyecto, corregir a pago
     if accion == "registrar_proyecto" and any(p in texto_low for p in _PALABRAS_PAGO):
         datos = dict(datos)
         datos["accion"] = "registrar_pago"
+        # Si no hay monto, dejamos 0 para que el código infiera el saldo
+        if datos.get("monto", 0) == 0:
+            datos["monto_inferido"] = True
+        return datos
+    
+    # Si la acción es actualizar y NO hay descripción de trabajo, no pisar descripción
     if accion == "actualizar_proyecto" and not _parece_descripcion_de_trabajo(texto_original):
         datos = dict(datos)
         datos["descripcion"] = ""
+    
     return datos
 
 def _es_escape(texto: str) -> bool:
@@ -144,7 +153,7 @@ def _resolver_numero_de_ultima_lista(context, texto: str):
 
 _PATRON_EDITAR_POR_NUMERO = re.compile(r'\b(edita|cambia|actualiza|el)\s+(?:el\s+)?(?:proyecto\s+)?(\d+)\b')
 
-# ==================== INTELIGENCIA ARTIFICIAL ====================
+# ==================== INTELIGENCIA ARTIFICIAL (PROMPT MEJORADO) ====================
 def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_existentes=""):
     conn = get_db_connection()
     cur = conn.cursor()
@@ -178,16 +187,34 @@ CLIENTES REGISTRADOS (usa estos nombres EXACTOS cuando reconozcas a un cliente):
 {', '.join(clientes_reales) if clientes_reales else 'Aún no hay clientes registrados.'}
 
 REGLAS ESTRICTAS (LEE CON ATENCIÓN):
-1. **CONTEXTO DE CLIENTE**: Si el jefe pregunta sobre un cliente o proyecto sin mencionarlo explícitamente, usa el último cliente activo (cliente_activo) o el mencionado en el mensaje anterior. Ej: si dijo "Alex Guizar" y luego pregunta "¿por qué está liquidado?", asume que se refiere a Alex Guizar.
-2. **EXPLICAR ESTADO**: Si el jefe pregunta "¿por qué está liquidado?", "¿por qué cancelado?", etc., usa la acción "explicar_estado". Busca el proyecto del cliente y explica la lógica: "Jefe, aparece como liquidado porque el monto total es igual al monto pagado. Si aún no lo entregas, podemos cambiarlo a 'Por cobrar' o 'En proceso'." Ofrece opciones para corregir.
-3. **DETECCIÓN DE NOMBRES SIMILARES**: Antes de registrar un cliente nuevo, si el nombre mencionado tiene un apellido que coincide con algún cliente existente (ej: "Guizar" coincide con "Alex Guizar"), NO crees el cliente de inmediato. En su lugar, usa "preguntar" para consultar: "Jefe, ya tengo registrado a 'Alex Guizar'. ¿Te refieres a él o es otra persona?".
-4. **REGISTRO DE CLIENTE**: Cuando el jefe diga "registra a [nombre]", extrae toda la información: dirección, teléfono, trabajo, monto (si lo da). Si falta el monto del presupuesto, pregunta una sola vez. Si el jefe responde "pendiente", guarda con monto 0.
-5. **NOMBRE DEL PROYECTO (campo `nombre_corto`)**: Debe ser el NOMBRE DEL TRABAJO específico, NO el nombre del cliente.
-6. **PRESUPUESTO ENVIADO**: Incluye el monto si lo da. NO reescribas "descripcion" solo porque mencionó un monto.
+
+1. **CONTEXTO DE CLIENTE**: Si el jefe pregunta sobre un cliente o proyecto sin mencionarlo explícitamente, usa el último cliente activo (cliente_activo) o el mencionado en el mensaje anterior.
+
+2. **INFERENCIA DE PAGOS (MUY IMPORTANTE)**:
+   - Si el jefe dice "ya me pagó", "me pagó lo que faltaba", "ya liquidó", "ya entregué" + cliente, y **NO da un monto**:
+     → NO registres pago con 0. En su lugar, usa accion "preguntar" y pregunta:
+       "Jefe, ¿[cliente] te pagó los $[saldo_pendiente] que faltan para liquidar el proyecto?"
+     → El saldo_pendiente es (Total - Pagado) del proyecto activo del cliente.
+   - Si el jefe confirma "sí", entonces registra el pago por ese saldo y cambia estado a "Liquidado".
+   - Si el jefe dice "no" o da otro monto, usa ese monto para el pago.
+
+3. **DETECCIÓN DE NOMBRES SIMILARES**: Antes de registrar un cliente nuevo, si el nombre mencionado tiene un apellido que coincide con algún cliente existente, pregunta antes de crear.
+
+4. **REGISTRO DE CLIENTE**: Extrae toda la información posible: dirección, teléfono, trabajo, monto. Si falta el monto, pregunta una sola vez.
+
+5. **NOMBRE DEL PROYECTO**: Debe ser el NOMBRE DEL TRABAJO, NO el nombre del cliente.
+
+6. **PRESUPUESTO ENVIADO**: Incluye el monto si lo da. NO reescribas "descripcion" solo por mencionar un monto.
+
 7. **CONSULTAS**: "qué clientes tengo" → "consultar" tipo "activos". "liquidados" → "liquidados". "cancelados" → "cancelados".
+
 8. **BORRAR**: "borra", "elimina", "quiero eliminar clientes" → "iniciar_borrado".
+
 9. **GASTOS**: "gasté" sin cliente → "registrar_gasto". "gastos" → "consultar_gastos".
-10. **FUSIONAR**: "fusiona", "combina", "une" + proyectos del mismo cliente → "fusionar_proyectos".
+
+10. **FUSIONAR**: "fusiona", "combina", "une" + proyectos → "fusionar_proyectos".
+
+11. **EXPLICAR ESTADO**: Si el jefe pregunta "¿por qué está liquidado?" → "explicar_estado".
 
 Responde SOLO con JSON:
 {{
@@ -197,7 +224,7 @@ Responde SOLO con JSON:
       "cliente": "nombre",
       "nombre_corto": "nombre breve del TRABAJO",
       "monto": numero o 0,
-      "descripcion": "detalles del trabajo (solo si se describe)",
+      "descripcion": "detalles del trabajo",
       "notas": "",
       "telefono": "",
       "direccion": "",
@@ -263,18 +290,11 @@ def transcribir_audio(ruta_archivo):
 
 # ==================== BASE DE DATOS ====================
 def buscar_o_crear_cliente(cur, nombre_cliente, telefono="", direccion="", notas=""):
-    """
-    Busca cliente por nombre completo o por apellidos. Si encuentra un cliente existente
-    con el mismo apellido, devuelve (cliente_id, flag_duplicado, nombre_existente).
-    """
     nombre_cliente = nombre_cliente.lower().strip()
-    # Buscar por nombre completo
     cur.execute("SELECT id, nombre FROM clientes WHERE unaccent(nombre) ILIKE unaccent(%s)", (f"%{nombre_cliente}%",))
     resultado = cur.fetchone()
     if resultado:
         return resultado[0], False, None
-
-    # Buscar por apellido (última palabra)
     partes = nombre_cliente.split()
     if len(partes) > 1:
         apellido = partes[-1]
@@ -282,8 +302,6 @@ def buscar_o_crear_cliente(cur, nombre_cliente, telefono="", direccion="", notas
         coincidencia = cur.fetchone()
         if coincidencia:
             return None, True, coincidencia[1]
-
-    # Si no hay coincidencia, crear nuevo cliente
     cur.execute("INSERT INTO clientes (nombre, telefono, direccion, notas_adicionales) VALUES (%s, %s, %s, %s) RETURNING id", 
                 (nombre_cliente, telefono or None, direccion or None, notas or None))
     return cur.fetchone()[0], False, None
@@ -556,15 +574,16 @@ def cancelar_proyecto_especifico(cur, cliente_nombre, nombre_corto):
     return False
 
 def registrar_pago(cur, cliente_nombre, monto_pago, referencia=""):
+    """Registra un pago. Devuelve (proyecto_id, mensaje, candidatos, saldo_pendiente)."""
     cliente_nombre = cliente_nombre.lower().strip()
     monto_pago = Decimal(str(monto_pago))
     proyecto_id, candidatos = resolver_proyecto_activo(cur, cliente_nombre, referencia)
     if proyecto_id is None:
-        return None, None, candidatos
+        return None, None, candidatos, None
     cur.execute("SELECT monto_total, monto_pagado, estado, nombre_corto FROM proyectos WHERE id = %s", (proyecto_id,))
     row = cur.fetchone()
     if not row:
-        return None, None, []
+        return None, None, [], None
     monto_total, monto_pagado_actual, estado_actual, nombre_corto = row
     monto_total = Decimal(str(monto_total))
     monto_pagado_actual = Decimal(str(monto_pagado_actual))
@@ -576,7 +595,7 @@ def registrar_pago(cur, cliente_nombre, monto_pago, referencia=""):
     cur.execute("UPDATE proyectos SET monto_pagado = %s, estado = %s WHERE id = %s",
                 (float(nuevo_pagado), nuevo_estado, proyecto_id))
     msg = f"{nombre_corto}: Anticipo/Pago ${float(monto_pago):.2f}. Saldo: ${float(saldo):.2f}. Estado: {nuevo_estado}"
-    return proyecto_id, msg, []
+    return proyecto_id, msg, [], float(saldo)
 
 def marcar_material_comprado(cur, proyecto_id, costo=None):
     if costo is not None:
@@ -685,9 +704,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "¡Hola, jefe! 🛠️ Su secretario está listo.\n\n"
         "Hable conmigo como lo haría con su asistente.\n"
         "Ejemplos:\n"
-        "- 'Registra a Juan Pérez, calle siempre viva 123, tel 5551234, 2 ventanas negras'\n"
-        "- 'El presupuesto es de 8000'\n"
-        "- 'Ya mandé presupuesto a Juan por 8000'\n"
+        "- 'Registra a Diana Guizar, calle fresno 734, 1 cancel de baño'\n"
+        "- 'El presupuesto es de 4500'\n"
+        "- 'Ya mandé presupuesto a Diana por 4500'\n"
+        "- 'Diana ya me pagó' (sin monto, yo calculo el saldo)\n"
         "- 'Quiero eliminar clientes'\n"
         "- 'Fusiona los proyectos 1 y 2 de Juan'\n"
         "Si no tiene el presupuesto, diga 'pendiente' y lo guardo igual."
@@ -1176,7 +1196,6 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
                 await update.message.reply_text(f"ℹ️ El proyecto de {nombre_cliente} está en estado **{estado}**. No hay nada inusual que explicar.")
                 return False
         else:
-            # múltiples proyectos, preguntar cuál
             msg = f"👤 **{nombre_cliente}** tiene varios proyectos activos. ¿Cuál quieres revisar?\n\n"
             for i, p in enumerate(proyectos, 1):
                 msg += f"{i}. *{p[1] or 'Proyecto'}* - ${p[3]:.2f} ({p[5]})\n"
@@ -1203,6 +1222,7 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
     direccion = datos.get("direccion", "")
     notas = datos.get("notas", "")
     resumen_ia = datos.get("resumen", "")
+    monto_inferido = datos.get("monto_inferido", False)
 
     if cliente_nombre != "Desconocido" and cliente_nombre != cliente_activo:
         context.user_data['cliente_activo'] = cliente_nombre.lower()
@@ -1367,10 +1387,59 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
             await update.message.reply_text(msg, parse_mode='Markdown')
             return True
 
-    # ===== REGISTRAR PAGO =====
+    # ===== REGISTRAR PAGO (CON INFERENCIA DE SALDO) =====
     if accion == "registrar_pago":
         buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion)
-        proyecto_id, msg_pago, candidatos = registrar_pago(cur, cliente_nombre, monto, nombre_corto or descripcion)
+        
+        # Si el monto es 0 y el usuario dijo "ya me pagó" (monto_inferido), calcular saldo
+        if monto == 0 and monto_inferido:
+            # Obtener el proyecto activo para calcular saldo
+            proyectos = obtener_proyectos_activos(cur, cliente_nombre)
+            if not proyectos:
+                cur.close(); conn.close()
+                await update.message.reply_text(f"⚠️ No encontré proyectos activos para {cliente_nombre}, jefe.")
+                return False
+            if len(proyectos) == 1:
+                pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat, pres_comp, fecha_pres = proyectos[0]
+                saldo = total - pagado
+                if saldo > 0:
+                    # Preguntar confirmación
+                    cur.close(); conn.close()
+                    await update.message.reply_text(
+                        f"🤔 Jefe, {cliente_nombre} te debe ${saldo:.2f} para liquidar el proyecto '{nc}'. "
+                        f"¿Ya te pagó esa cantidad?"
+                    )
+                    context.user_data['estado_espera'] = 'confirmar_pago_inferido'
+                    context.user_data['pago_inferido'] = {
+                        'cliente': cliente_nombre,
+                        'proyecto_id': pid,
+                        'saldo': saldo,
+                        'monto': monto,
+                        'nombre_corto': nc,
+                        'resumen_ia': resumen_ia
+                    }
+                    return True
+                else:
+                    cur.close(); conn.close()
+                    await update.message.reply_text(f"ℹ️ El proyecto de {cliente_nombre} ya está liquidado (saldo $0.00).")
+                    return False
+            else:
+                # Múltiples proyectos, preguntar cuál
+                cur.close(); conn.close()
+                msg = f"👤 **{cliente_nombre}** tiene varios proyectos activos. ¿Cuál recibió el pago?\n\n"
+                for i, p in enumerate(proyectos, 1):
+                    saldo = p[3] - p[4]
+                    msg += f"{i}. *{p[1] or 'Proyecto'}* - Saldo: ${saldo:.2f}\n"
+                msg += "\nResponde el número."
+                context.user_data['estado_espera'] = 'seleccion_pago_inferido'
+                context.user_data['proyectos_pago_inferido'] = proyectos
+                context.user_data['cliente_pago_inferido'] = cliente_nombre
+                context.user_data['resumen_ia_pago'] = resumen_ia
+                await update.message.reply_text(msg, parse_mode='Markdown')
+                return True
+
+        # Pago normal con monto específico
+        proyecto_id, msg_pago, candidatos, saldo = registrar_pago(cur, cliente_nombre, monto, nombre_corto or descripcion)
         if proyecto_id:
             conn.commit(); cur.close(); conn.close()
             await update.message.reply_text(f"💰 Pago registrado: {resumen_ia}\n{msg_pago}")
@@ -1479,7 +1548,7 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         logging.error(f"🔴 Error: {e}")
         await update.message.reply_text(f"❌ Error interno: {str(e)[:150]}. Lo siento, jefe.")
 
-# ==================== MANEJO DE MENSAJES ====================
+# ==================== MANEJO DE MENSAJES (CON BUCLE ROTO) ====================
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
         texto = update.message.text
@@ -1519,6 +1588,12 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await procesar_confirmar_cliente_duplicado(update, context, texto)
         elif estado == 'esperando_cambio_estado':
             await procesar_cambio_estado(update, context, texto)
+        elif estado == 'esperando_nuevo_estado':
+            await procesar_nuevo_estado(update, context, texto)
+        elif estado == 'confirmar_pago_inferido':
+            await procesar_confirmar_pago_inferido(update, context, texto)
+        elif estado == 'seleccion_pago_inferido':
+            await procesar_seleccion_pago_inferido(update, context, texto)
         else:
             await procesar_texto(update, context, texto)
     elif update.message.voice:
@@ -1928,7 +2003,6 @@ async def procesar_cambio_estado(update, context, respuesta):
             context.user_data['estado_espera'] = None
             return
         if _es_confirmacion(respuesta):
-            # Ofrecer opciones de estado
             await update.message.reply_text(
                 "📋 ¿A qué estado quieres cambiarlo?\n\n"
                 "1. Por cobrar\n"
@@ -1986,7 +2060,6 @@ async def procesar_confirmar_cliente_duplicado(update, context, respuesta):
             context.user_data['estado_espera'] = None
             return
         if _es_confirmacion(respuesta):
-            # Usar cliente existente (buscar por nombre real)
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("SELECT id FROM clientes WHERE unaccent(nombre) ILIKE unaccent(%s)", (f"%{datos['cliente']}%",))
@@ -1994,12 +2067,9 @@ async def procesar_confirmar_cliente_duplicado(update, context, respuesta):
             if cliente_id:
                 cliente_id = cliente_id[0]
             else:
-                # Crear nuevo si no existe (fallback)
                 cur.execute("INSERT INTO clientes (nombre, telefono, direccion, notas_adicionales) VALUES (%s, %s, %s, %s) RETURNING id",
                             (datos['cliente'], datos.get('telefono'), datos.get('direccion'), datos.get('notas')))
                 cliente_id = cur.fetchone()[0]
-            # Ahora ejecutar la acción original con este cliente_id
-            # Reconstruir la acción
             accion_original = datos['accion']
             datos_originales = datos['datos']
             if accion_original == "registrar_proyecto":
@@ -2010,12 +2080,11 @@ async def procesar_confirmar_cliente_duplicado(update, context, respuesta):
                 cur.close(); conn.close()
                 await update.message.reply_text("✅ Proyecto registrado con el cliente existente, jefe.")
             elif accion_original == "marcar_presupuesto_enviado":
-                # Similar...
+                # Similar
                 pass
             context.user_data['estado_espera'] = None
             context.user_data['datos_cliente_duplicado'] = None
         else:
-            # Crear nuevo cliente
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("INSERT INTO clientes (nombre, telefono, direccion, notas_adicionales) VALUES (%s, %s, %s, %s) RETURNING id",
@@ -2032,6 +2101,111 @@ async def procesar_confirmar_cliente_duplicado(update, context, respuesta):
                 await update.message.reply_text("✅ Nuevo cliente y proyecto registrados, jefe.")
             context.user_data['estado_espera'] = None
             context.user_data['datos_cliente_duplicado'] = None
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
+async def procesar_confirmar_pago_inferido(update, context, respuesta):
+    """Confirma el pago inferido (el bot pregunta si pagó el saldo)."""
+    try:
+        datos = context.user_data.get('pago_inferido')
+        if not datos:
+            await update.message.reply_text("⚠️ No tengo datos en memoria, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+        if _es_confirmacion(respuesta):
+            # Registrar el pago por el saldo
+            conn = get_db_connection()
+            cur = conn.cursor()
+            proyecto_id, msg, candidatos, saldo = registrar_pago(cur, datos['cliente'], datos['saldo'], datos['nombre_corto'])
+            if proyecto_id:
+                conn.commit()
+                cur.close(); conn.close()
+                await update.message.reply_text(f"💰 Pago registrado: {datos['resumen_ia']}\n{msg}")
+                context.user_data['estado_espera'] = None
+                context.user_data['pago_inferido'] = None
+                return
+            else:
+                conn.close()
+                await update.message.reply_text("⚠️ No pude registrar el pago. Intenta de nuevo.")
+                context.user_data['estado_espera'] = None
+                context.user_data['pago_inferido'] = None
+                return
+        else:
+            await update.message.reply_text("📝 Entendido. ¿Cuánto te pagó exactamente?")
+            context.user_data['estado_espera'] = 'esperando_monto_pago_inferido'
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
+async def procesar_seleccion_pago_inferido(update, context, respuesta):
+    """Selecciona el proyecto para el pago inferido."""
+    try:
+        proyectos = context.user_data.get('proyectos_pago_inferido', [])
+        cliente_nombre = context.user_data.get('cliente_pago_inferido', '')
+        resumen_ia = context.user_data.get('resumen_ia_pago', '')
+        if not proyectos:
+            await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+        numero = _es_respuesta_numerica_simple(respuesta)
+        if numero is None or not numero.is_integer():
+            await update.message.reply_text("⚠️ Responde con el número del proyecto.")
+            return
+        idx = int(numero) - 1
+        if idx < 0 or idx >= len(proyectos):
+            await update.message.reply_text("⚠️ Número fuera de rango.")
+            return
+        pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat, pres_comp, fecha_pres = proyectos[idx]
+        saldo = total - pagado
+        if saldo > 0:
+            await update.message.reply_text(
+                f"🤔 Jefe, el saldo pendiente para '{nc}' es ${saldo:.2f}. "
+                f"¿Ya te pagó esa cantidad para liquidar el proyecto?"
+            )
+            context.user_data['estado_espera'] = 'confirmar_pago_inferido'
+            context.user_data['pago_inferido'] = {
+                'cliente': cliente_nombre,
+                'proyecto_id': pid,
+                'saldo': saldo,
+                'nombre_corto': nc,
+                'resumen_ia': resumen_ia
+            }
+        else:
+            await update.message.reply_text(f"ℹ️ El proyecto '{nc}' ya está liquidado (saldo $0.00).")
+            context.user_data['estado_espera'] = None
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
+async def procesar_monto_pago_inferido(update, context, respuesta):
+    """Recibe el monto exacto del pago inferido."""
+    try:
+        datos = context.user_data.get('pago_inferido')
+        if not datos:
+            await update.message.reply_text("⚠️ No tengo datos en memoria, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+        monto = _es_respuesta_numerica_simple(respuesta)
+        if monto is None:
+            await update.message.reply_text("⚠️ No entendí el monto. Escribe solo el número (ej: 2000).")
+            return
+        conn = get_db_connection()
+        cur = conn.cursor()
+        proyecto_id, msg, candidatos, saldo = registrar_pago(cur, datos['cliente'], monto, datos['nombre_corto'])
+        if proyecto_id:
+            conn.commit()
+            cur.close(); conn.close()
+            await update.message.reply_text(f"💰 Pago registrado: {datos['resumen_ia']}\n{msg}")
+            context.user_data['estado_espera'] = None
+            context.user_data['pago_inferido'] = None
+            return
+        else:
+            conn.close()
+            await update.message.reply_text("⚠️ No pude registrar el pago. Intenta de nuevo.")
+            context.user_data['estado_espera'] = None
+            context.user_data['pago_inferido'] = None
+            return
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
@@ -2066,5 +2240,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot COMPLETO: todas las correcciones de Qwen implementadas.")
+    print("🤖 Bot TALLER ALUMINIO con inferencia de pagos y contexto mejorado.")
     app.run_polling(drop_pending_updates=True)
