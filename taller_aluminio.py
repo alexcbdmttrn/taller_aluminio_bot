@@ -77,7 +77,6 @@ _PALABRAS_NUMERO = {
     "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5,
     "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10,
     "once": 11, "doce": 12, "trece": 13, "catorce": 14, "quince": 15,
-    "dieciséis": 16, "diecisiete": 17, "dieciocho": 18, "diecinueve": 19, "veinte": 20,
     "primero": 1, "segundo": 2, "tercero": 3, "cuarto": 4, "quinto": 5,
     "sexto": 6, "séptimo": 7, "octavo": 8, "noveno": 9, "décimo": 10
 }
@@ -119,7 +118,6 @@ def _es_escape(texto: str) -> bool:
     return t in _PALABRAS_ESCAPE or any(t.startswith(p) for p in _PALABRAS_ESCAPE)
 
 def _es_confirmacion(texto: str) -> bool:
-    """Detecta confirmación de forma flexible, incluso desde audio transcrito."""
     t = texto.strip().lower()
     for p in _PALABRAS_CONFIRMACION:
         if t == p:
@@ -993,6 +991,7 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
     context.user_data['estado_espera'] = 'esperando_seleccion_borrado'
     await update.message.reply_text(msg, parse_mode='Markdown')
 
+# ==================== VERSIÓN CORREGIDA DE procesar_seleccion_borrado ====================
 async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     respuesta = update.message.text
     try:
@@ -1016,6 +1015,7 @@ async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAU
                     await update.message.reply_text("⚠️ Número fuera de rango. Intenta de nuevo.")
                     return
             else:
+                # Fallback: buscar números con regex
                 numeros = re.findall(r'\b\d+\b', respuesta)
                 if not numeros:
                     await update.message.reply_text("⚠️ No entendí. Escribe números separados por comas (ej: 1,3,5) o 'todos'.")
@@ -1541,7 +1541,7 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         logging.error(f"🔴 Error: {e}")
         await update.message.reply_text(f"❌ Error interno: {str(e)[:150]}. Lo siento, jefe.")
 
-# ==================== MANEJO DE MENSAJES ====================
+# ==================== MANEJO DE MENSAJES (CORREGIDO CON ROUTING DE VOZ) ====================
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
         texto = update.message.text
@@ -1601,11 +1601,63 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await file.download_to_drive(ruta)
             texto = transcribir_audio(ruta)
             os.remove(ruta)
-            if len(texto.strip().split()) < 3:
-                await update.message.reply_text("🎙️ No entendí bien el audio, ¿puedes repetirlo, jefe?")
-                return
+            
+            # ==== CORRECCIÓN 1: ELIMINADA RESTRICCIÓN DE 3 PALABRAS ====
+            # Ya no se rechaza por longitud corta. Se acepta "uno", "el uno", etc.
+            
+            # Mostrar transcripción al jefe
             await update.message.reply_text(f"📝 *\"{texto}\"*", parse_mode='Markdown')
-            await procesar_texto(update, context, texto)
+            
+            # ==== CORRECCIÓN 2: ROUTING DE VOZ RESPETA estado_espera ====
+            estado = context.user_data.get('estado_espera')
+            
+            if estado and _es_escape(texto):
+                for key in list(context.user_data.keys()):
+                    if key not in ('historial', 'cliente_activo', 'ultima_lista'):
+                        context.user_data[key] = None
+                context.user_data['estado_espera'] = None
+                await update.message.reply_text("✅ Ok, lo dejo así, jefe. ¿En qué más le ayudo?")
+                return
+
+            if estado == 'esperando_tipo_borrado':
+                await procesar_tipo_borrado(update, context)
+            elif estado == 'esperando_seleccion_borrado':
+                await procesar_seleccion_borrado(update, context)
+            elif estado == 'confirmar_borrado':
+                await procesar_confirmacion_borrado(update, context)
+            elif estado == 'seleccion_material':
+                await procesar_seleccion_material(update, context, texto)
+            elif estado == 'esperando_costo_material':
+                await procesar_costo_material(update, context, texto)
+            elif estado == 'seleccion_cancelar':
+                await procesar_seleccion_cancelar(update, context, texto)
+            elif estado == 'seleccion_presupuesto':
+                await procesar_seleccion_presupuesto(update, context, texto)
+            elif estado == 'seleccion_actualizar':
+                await procesar_seleccion_actualizar(update, context, texto)
+            elif estado == 'seleccion_pago':
+                await procesar_seleccion_pago(update, context, texto)
+            elif estado == 'seleccion_fusion':
+                await procesar_seleccion_fusion(update, context, texto)
+            elif estado == 'seleccion_explicar_estado':
+                await procesar_seleccion_explicar_estado(update, context, texto)
+            elif estado == 'esperando_cambio_estado':
+                await procesar_cambio_estado(update, context, texto)
+            elif estado == 'esperando_nuevo_estado':
+                await procesar_nuevo_estado(update, context, texto)
+            elif estado == 'confirmar_cliente_duplicado':
+                await procesar_confirmar_cliente_duplicado(update, context, texto)
+            elif estado == 'esperando_confirmacion_cierre':
+                await procesar_confirmacion_cierre(update, context, texto)
+            elif estado == 'seleccion_cierre':
+                await procesar_seleccion_cierre(update, context, texto)
+            elif estado == 'esperando_monto_cierre':
+                await procesar_monto_cierre(update, context, texto)
+            elif estado == 'esperando_confirmacion_monto_cierre':
+                await procesar_confirmacion_monto_cierre(update, context, texto)
+            else:
+                await procesar_texto(update, context, texto)
+                
         except Exception as e:
             await update.message.reply_text(f"❌ Error de audio: {str(e)[:100]}. Disculpe, jefe.")
 
@@ -2100,7 +2152,7 @@ async def procesar_confirmar_cliente_duplicado(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-# ===== FUNCIONES PARA CIERRE DE PROYECTO (CORREGIDAS) =====
+# ===== FUNCIONES PARA CIERRE DE PROYECTO =====
 async def procesar_confirmacion_cierre(update, context, respuesta):
     try:
         proyecto_id = context.user_data.get('cierre_proyecto_id')
@@ -2112,7 +2164,6 @@ async def procesar_confirmacion_cierre(update, context, respuesta):
             context.user_data['estado_espera'] = None
             return
 
-        # Limpiar estado ANTES de procesar para evitar bucles
         context.user_data['estado_espera'] = None
         context.user_data['cierre_proyecto_id'] = None
         context.user_data['cierre_cliente'] = None
@@ -2213,7 +2264,6 @@ async def procesar_monto_cierre(update, context, respuesta):
             context.user_data['monto_cierre'] = monto
             return
 
-        # Registrar pago parcial
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT monto_pagado, nombre_corto FROM proyectos WHERE id = %s", (proyecto_id,))
@@ -2313,5 +2363,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot COMPLETO: confirmación desde audio, cierre de proyecto, liquidación, y todas las correcciones.")
+    print("🤖 Bot CORREGIDO: routing de voz con estado, eliminada restricción de 3 palabras, y extracción de números mejorada.")
     app.run_polling(drop_pending_updates=True)
