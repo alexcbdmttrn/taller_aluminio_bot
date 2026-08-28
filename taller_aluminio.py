@@ -65,7 +65,9 @@ REGLAS ESTRICTAS:
 6. **MATERIAL**: "compré material", "ya compré" + cliente. Si menciona monto, lo guarda.
 7. **CONSULTA PRESUPUESTO**: "¿ya se entregó presupuesto a [cliente]?" → accion "consultar_presupuesto".
 8. **CONSULTA MATERIAL**: "¿ya compré material?", "¿material comprado?" + cliente → accion "consultar_material".
-9. **CONSULTAS GENERALES**: Solo si pregunta explícitamente "qué clientes tengo", "muestrame los clientes" → accion "consultar".
+9. **CONSULTAS GENERALES**: "qué clientes tengo", "muestrame los clientes", "clientes activos" → accion "consultar" con tipo_consulta "activos".
+   "muestrame clientes cancelados", "proyectos cancelados", "cancelados" → accion "consultar" con tipo_consulta "cancelados".
+   "liquidados" → tipo_consulta "liquidados".
 10. **CANCELAR**: "cancela", "cancelar" + nombre específico. NUNCA canceles todos sin preguntar.
 11. **BORRAR**: "borra", "elimina", "borrar" + [cliente] → accion "iniciar_borrado" con tipo_borrado: "activos" y cliente: "[nombre]". Si no menciona cliente, inicia borrado general (pregunta tipo).
 12. **GASTOS**: "gasté", "gaste" sin cliente → accion "registrar_gasto". "gastos" → accion "consultar_gastos". "borrar gastos" → "iniciar_borrado" tipo "gastos".
@@ -80,6 +82,7 @@ Responde SOLO con JSON:
   "notas": "",
   "estado": "Pendiente de cotizar" | "Presupuesto enviado" | "Aceptado" | "En proceso" | "Por cobrar" | "Liquidado" | "Cancelado",
   "tipo_borrado": "activos" | "cancelados" | "liquidados" | "gastos",
+  "tipo_consulta": "activos" | "cancelados" | "liquidados" | "deudores" | "pendientes" | "todos",
   "pregunta": "texto de la pregunta",
   "resumen": "frase corta"
 }}
@@ -114,7 +117,6 @@ def transcribir_audio(ruta_archivo):
 
 # ==================== BASE DE DATOS ====================
 def buscar_o_crear_cliente(cur, nombre_cliente, telefono="", direccion="", notas=""):
-    # Usamos unaccent en la búsqueda para ignorar tildes
     cur.execute("SELECT id FROM clientes WHERE unaccent(nombre) ILIKE unaccent(%s)", (f"%{nombre_cliente}%",))
     cliente = cur.fetchone()
     if cliente:
@@ -132,8 +134,9 @@ def buscar_o_crear_cliente(cur, nombre_cliente, telefono="", direccion="", notas
         return cur.fetchone()[0]
 
 def obtener_proyectos_activos_por_cliente(cur, cliente_nombre):
-    """Busca proyectos activos de un cliente con búsqueda flexible y sin tildes."""
-    # Primero intentar con unaccent
+    """Busca proyectos activos de un cliente con búsqueda flexible y sin tildes.
+       Devuelve lista de tuplas: (id, nombre_corto, descripcion, monto_total, monto_pagado, estado, material_comprado, ... , cliente_nombre)
+    """
     cur.execute("""
         SELECT p.id, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
                p.material_comprado, p.fecha_compra_material, p.costo_material,
@@ -146,8 +149,6 @@ def obtener_proyectos_activos_por_cliente(cur, cliente_nombre):
     resultados = cur.fetchall()
     if resultados:
         return resultados
-    
-    # Si no encuentra, buscar por palabras separadas (también con unaccent)
     palabras = cliente_nombre.split()
     if len(palabras) > 1:
         condiciones = " AND ".join(["unaccent(c.nombre) ILIKE unaccent(%s)" for _ in palabras])
@@ -162,22 +163,10 @@ def obtener_proyectos_activos_por_cliente(cur, cliente_nombre):
             ORDER BY p.fecha_creacion DESC
         """, params)
         return cur.fetchall()
-    
     return []
 
-def obtener_proyectos_activos_generales(cur):
-    cur.execute("""
-        SELECT c.nombre, p.id, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
-               p.material_comprado, p.fecha_compra_material, p.costo_material,
-               p.presupuesto_enviado, p.fecha_presupuesto
-        FROM proyectos p 
-        JOIN clientes c ON p.cliente_id = c.id 
-        WHERE p.estado NOT IN ('Liquidado', 'Cancelado')
-        ORDER BY c.nombre, p.fecha_creacion DESC
-    """)
-    return cur.fetchall()
-
 def obtener_proyectos_por_estado(cur, estado):
+    """Devuelve lista de tuplas: (cliente_nombre, id, nombre_corto, descripcion, monto_total, estado)"""
     if estado == "activos":
         condicion = "p.estado NOT IN ('Liquidado', 'Cancelado')"
     elif estado == "cancelados":
@@ -211,7 +200,7 @@ def borrar_gastos_por_ids(cur, ids):
     cur.execute("DELETE FROM gastos WHERE id = ANY(%s)", (ids,))
     return cur.rowcount
 
-# ==================== FUNCIONES DE PROYECTOS (ya existentes) ====================
+# ==================== FUNCIONES DE PROYECTOS ====================
 def obtener_proyectos_activos(cur, cliente_nombre):
     cur.execute("""
         SELECT p.id, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
@@ -366,17 +355,47 @@ def consultar_presupuesto_cliente(cur, cliente_nombre):
     """, (f"%{cliente_nombre}%",))
     return cur.fetchall()
 
-def consultar_proyectos(cur, tipo, cliente_nombre=None):
-    if cliente_nombre:
-        if tipo == "deudores":
+def consultar_proyectos(cur, tipo_consulta, cliente_nombre=None):
+    if tipo_consulta == "cancelados":
+        # Lista proyectos cancelados (puede filtrar por cliente si se pasa)
+        if cliente_nombre:
             cur.execute("""
-                SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, 
-                       (p.monto_total - p.monto_pagado) as saldo
-                FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
-                WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado IN ('Por cobrar', 'En proceso') AND p.monto_total > p.monto_pagado 
-                ORDER BY saldo DESC
+                SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
+                       p.presupuesto_enviado, p.material_comprado
+                FROM proyectos p JOIN clientes c ON p.cliente_id = c.id 
+                WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado = 'Cancelado'
+                ORDER BY p.fecha_creacion DESC
             """, (f"%{cliente_nombre}%",))
         else:
+            cur.execute("""
+                SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
+                       p.presupuesto_enviado, p.material_comprado
+                FROM proyectos p JOIN clientes c ON p.cliente_id = c.id 
+                WHERE p.estado = 'Cancelado'
+                ORDER BY c.nombre, p.fecha_creacion DESC
+            """)
+        return cur.fetchall()
+    elif tipo_consulta == "liquidados":
+        if cliente_nombre:
+            cur.execute("""
+                SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
+                       p.presupuesto_enviado, p.material_comprado
+                FROM proyectos p JOIN clientes c ON p.cliente_id = c.id 
+                WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado = 'Liquidado'
+                ORDER BY p.fecha_creacion DESC
+            """, (f"%{cliente_nombre}%",))
+        else:
+            cur.execute("""
+                SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
+                       p.presupuesto_enviado, p.material_comprado
+                FROM proyectos p JOIN clientes c ON p.cliente_id = c.id 
+                WHERE p.estado = 'Liquidado'
+                ORDER BY c.nombre, p.fecha_creacion DESC
+            """)
+        return cur.fetchall()
+    elif tipo_consulta == "activos":
+        # Similar a "todos" pero sin liquidados/cancelados
+        if cliente_nombre:
             cur.execute("""
                 SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
                        p.presupuesto_enviado, p.material_comprado
@@ -384,28 +403,7 @@ def consultar_proyectos(cur, tipo, cliente_nombre=None):
                 WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado NOT IN ('Liquidado', 'Cancelado')
                 ORDER BY p.fecha_creacion DESC
             """, (f"%{cliente_nombre}%",))
-    else:
-        if tipo == "deudores":
-            cur.execute("""
-                SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, 
-                       (p.monto_total - p.monto_pagado) as saldo
-                FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
-                WHERE p.estado IN ('Por cobrar', 'En proceso') AND p.monto_total > p.monto_pagado 
-                ORDER BY saldo DESC
-            """)
-        elif tipo == "pendientes":
-            cur.execute("""
-                SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total 
-                FROM proyectos p JOIN clientes c ON p.cliente_id = c.id 
-                WHERE p.estado = 'Pendiente de cotizar'
-            """)
-        elif tipo == "liquidados":
-            cur.execute("""
-                SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total 
-                FROM proyectos p JOIN clientes c ON p.cliente_id = c.id 
-                WHERE p.estado = 'Liquidado' LIMIT 10
-            """)
-        else:  # "todos"
+        else:
             cur.execute("""
                 SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
                        p.presupuesto_enviado, p.material_comprado
@@ -413,7 +411,25 @@ def consultar_proyectos(cur, tipo, cliente_nombre=None):
                 WHERE p.estado NOT IN ('Liquidado', 'Cancelado')
                 ORDER BY c.nombre, p.fecha_creacion DESC
             """)
-    return cur.fetchall()
+        return cur.fetchall()
+    else:
+        # "todos" u otro: mostrar todos los estados excepto cancelados? Por ahora mostramos activos
+        if cliente_nombre:
+            cur.execute("""
+                SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
+                       p.presupuesto_enviado, p.material_comprado
+                FROM proyectos p JOIN clientes c ON p.cliente_id = c.id 
+                WHERE unaccent(c.nombre) ILIKE unaccent(%s)
+                ORDER BY p.fecha_creacion DESC
+            """, (f"%{cliente_nombre}%",))
+        else:
+            cur.execute("""
+                SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
+                       p.presupuesto_enviado, p.material_comprado
+                FROM proyectos p JOIN clientes c ON p.cliente_id = c.id 
+                ORDER BY c.nombre, p.fecha_creacion DESC
+            """)
+        return cur.fetchall()
 
 # ==================== COMANDOS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -505,7 +521,7 @@ async def comando_resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        proyectos = consultar_proyectos(cur, "todos")
+        proyectos = consultar_proyectos(cur, "activos")
         cur.close(); conn.close()
         if not proyectos:
             await update.message.reply_text("📭 No hay clientes activos, jefe.")
@@ -606,7 +622,7 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
     cur = conn.cursor()
 
     if tipo == "gastos":
-        items = obtener_gastos(cur)
+        items = obtener_gastos(cur)  # cada item: (id, desc, monto, fecha)
         cur.close(); conn.close()
         if not items:
             await update.message.reply_text(f"📭 No hay gastos para borrar, jefe.")
@@ -616,37 +632,47 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
             fecha_str = fecha.strftime("%d/%m %H:%M")
             msg += f"{idx}. 💸 {fecha_str} | ${monto:.2f} - {desc}\n"
         context.user_data['borrar_tipo'] = 'gastos'
-        context.user_data['borrar_items'] = items
+        context.user_data['borrar_items'] = items  # items: (id, ...)
     else:
-        # Buscar proyectos del tipo especificado
+        # Proyectos: obtener lista con ID primero
         if cliente:
-            # Buscar activos de ese cliente específico (con búsqueda flexible y sin tildes)
             if tipo == "activos":
                 items = obtener_proyectos_activos_por_cliente(cur, cliente)
+                # items: (id, nombre_corto, desc, monto_total, monto_pagado, estado, ... , cliente_nombre)
+                # Normalizamos a (id, cliente_nombre, nombre_corto, desc, monto, estado)
+                items_normalizados = []
+                for row in items:
+                    # row: (id, nombre_corto, desc, monto_total, monto_pagado, estado, ... , cliente_nombre)
+                    # el último campo es el nombre del cliente
+                    cliente_nombre_db = row[-1] if len(row) > 10 else "Desconocido"
+                    items_normalizados.append((row[0], cliente_nombre_db, row[1], row[2], row[3], row[5]))
+                items = items_normalizados
                 label = "activos"
                 icono = "📋"
             else:
-                # Para cancelados/liquidados con cliente, usamos la función general y filtramos manualmente
-                items_generales = obtener_proyectos_por_estado(cur, tipo)
-                # Filtrar por cliente (búsqueda flexible sin tildes)
-                items = []
+                # cancelados o liquidados con cliente
+                items_raw = obtener_proyectos_por_estado(cur, tipo)
+                # items_raw: (cliente_nombre, id, nombre_corto, desc, monto, estado)
+                # Filtramos por cliente (búsqueda flexible)
                 palabras = cliente.split()
-                for item in items_generales:
+                items = []
+                for item in items_raw:
                     nombre_cliente_db = item[0]
-                    # Verificar si coincide con alguna palabra (usando unaccent)
                     for p in palabras:
                         cur_temp = conn.cursor()
                         cur_temp.execute("SELECT unaccent(%s) ILIKE unaccent(%s)", (nombre_cliente_db, f"%{p}%"))
                         coincide = cur_temp.fetchone()[0]
                         cur_temp.close()
                         if coincide:
-                            items.append(item)
+                            # Reordenamos: (id, cliente_nombre, nombre_corto, desc, monto, estado)
+                            items.append((item[1], item[0], item[2], item[3], item[4], item[5]))
                             break
                 label = tipo
                 icono = "🗑️" if tipo == "cancelados" else "✅" if tipo == "liquidados" else "📋"
         else:
-            # Sin cliente: listar todos los del tipo
-            items = obtener_proyectos_por_estado(cur, tipo)
+            items_raw = obtener_proyectos_por_estado(cur, tipo)
+            # Reordenamos: (id, cliente_nombre, nombre_corto, desc, monto, estado)
+            items = [(item[1], item[0], item[2], item[3], item[4], item[5]) for item in items_raw]
             label = tipo
             icono = "📋" if tipo == "activos" else "🗑️" if tipo == "cancelados" else "✅"
 
@@ -658,31 +684,21 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
                 await update.message.reply_text(f"📭 No hay proyectos {label} para borrar, jefe.")
             return
 
-        # Armar mensaje
         if cliente:
             msg = f"{icono} **PROYECTOS {label.upper()} DE {cliente.upper()}** (elige números separados por comas, o 'todos'):\n\n"
         else:
             msg = f"{icono} **PROYECTOS {label.upper()}** (elige números separados por comas, o 'todos'):\n\n"
 
-        for idx, item in enumerate(items, 1):
-            if len(item) >= 6:
-                nombre_cliente_db, pid, nc, desc, monto, estado = item[0], item[1], item[2], item[3], item[4], item[5]
-            else:
-                nombre_cliente_db = item[11] if len(item) > 11 else "Desconocido"
-                pid = item[0]
-                nc = item[1]
-                desc = item[2]
-                monto = item[3]
-                estado = item[5]
-            msg += f"{idx}. 👤 {nombre_cliente_db} | {nc or 'Proyecto General'} - ${monto:.2f} ({estado})\n   {desc}\n\n"
+        for idx, (pid, cliente_db, nc, desc, monto, estado) in enumerate(items, 1):
+            msg += f"{idx}. 👤 {cliente_db} | {nc or 'Proyecto General'} - ${monto:.2f} ({estado})\n   {desc}\n\n"
 
         context.user_data['borrar_tipo'] = 'proyectos'
-        context.user_data['borrar_items'] = items
+        context.user_data['borrar_items'] = items  # items: (id, cliente, nombre_corto, desc, monto, estado)
 
     context.user_data['estado_espera'] = 'esperando_seleccion_borrado'
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-async def procesar_seleccion_borrado(update, context, respuesta):
+async def procesar_seleccion_borrado(update: Update, context, respuesta):
     try:
         items = context.user_data.get('borrar_items', [])
         tipo = context.user_data.get('borrar_tipo')
@@ -693,7 +709,7 @@ async def procesar_seleccion_borrado(update, context, respuesta):
 
         resp = respuesta.strip().lower()
         if resp == 'todos':
-            ids = [item[0] for item in items]
+            ids = [item[0] for item in items]  # el primer elemento siempre es el ID
         else:
             numeros = re.findall(r'\d+', resp)
             if not numeros:
@@ -703,7 +719,7 @@ async def procesar_seleccion_borrado(update, context, respuesta):
             if not indices:
                 await update.message.reply_text("⚠️ Números fuera de rango. Intenta de nuevo.")
                 return
-            ids = [items[i-1][0] for i in indices]
+            ids = [items[i-1][0] for i in indices]  # primer elemento es el ID
 
         context.user_data['borrar_ids'] = ids
         context.user_data['estado_espera'] = 'confirmar_borrado'
@@ -810,14 +826,27 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
         return False
 
     if accion == "consultar":
+        tipo = datos.get("tipo_consulta", "activos")
+        cliente_filtro = datos.get("cliente", None)
         conn = get_db_connection()
         cur = conn.cursor()
-        proyectos = consultar_proyectos(cur, "todos")
+        proyectos = consultar_proyectos(cur, tipo, cliente_filtro)
         cur.close(); conn.close()
         if not proyectos:
-            await update.message.reply_text("📭 No hay clientes activos, jefe.")
+            if tipo == "cancelados":
+                await update.message.reply_text("📭 No hay proyectos cancelados, jefe.")
+            elif tipo == "liquidados":
+                await update.message.reply_text("📭 No hay proyectos liquidados, jefe.")
+            else:
+                await update.message.reply_text("📭 No hay clientes activos, jefe.")
             return False
-        msg = "📊 **CLIENTES ACTIVOS:**\n\n"
+        if tipo == "cancelados":
+            titulo = "🗑️ **PROYECTOS CANCELADOS**"
+        elif tipo == "liquidados":
+            titulo = "✅ **PROYECTOS LIQUIDADOS**"
+        else:
+            titulo = "📊 **CLIENTES ACTIVOS**"
+        msg = f"{titulo}:\n\n"
         for n, nc, desc, t, p, e, pres_comp, mat_comp in proyectos:
             pendiente = t - p
             pres_icon = "📋" if pres_comp else "⏳"
@@ -1287,5 +1316,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot COMPLETO: borrado granular, sin tildes, IA con lista de clientes, preguntas por ambigüedad...")
+    print("🤖 Bot COMPLETO con borrado corregido y consulta de cancelados...")
     app.run_polling(drop_pending_updates=True)
