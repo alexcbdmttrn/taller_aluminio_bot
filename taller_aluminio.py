@@ -58,11 +58,9 @@ _PALABRAS_ESCAPE = (
     "olvida eso", "cancela eso", "ya no importa", "mejor no", "cancelar todo"
 )
 
-_PALABRAS_CONFIRMACION = ("si", "sí", "yes", "sip", "va", "dale", "adelante", "confirmo", "correcto")
+_PALABRAS_CONFIRMACION = ("si", "sí", "yes", "sip", "va", "dale", "adelante", "confirmo", "correcto", "ok", "vale")
 
 _PALABRAS_DESCRIPCION_TRABAJO = ("ventana", "cancel", "puerta", "medida", "cristal", "aluminio", "barandal", "reja", "domo")
-
-_PALABRAS_ESTADO = ("liquidado", "cancelado", "aceptado", "proceso", "pendiente", "presupuesto")
 
 _PALABRAS_CIERRE = (
     "entregué", "entregue", "terminé", "termine", "completé", "complete",
@@ -91,28 +89,19 @@ def validar_accion(datos: dict) -> str | None:
     return None
 
 def _corregir_accion_con_texto(datos: dict, texto_original: str, cliente_activo: str = "") -> dict:
-    """Corrige el JSON de la IA detectando palabras clave en el texto original."""
     texto_low = texto_original.lower()
     accion = datos.get("accion")
-    
-    # Detectar pago
     if accion == "registrar_proyecto" and any(p in texto_low for p in _PALABRAS_PAGO):
         datos = dict(datos)
         datos["accion"] = "registrar_pago"
-    
-    # Detectar cierre de proyecto
     if any(p in texto_low for p in _PALABRAS_CIERRE):
         datos = dict(datos)
         datos["accion"] = "cerrar_proyecto"
-        # Si no tiene cliente, usar el activo
         if not datos.get("cliente") or datos.get("cliente") == "Desconocido":
             datos["cliente"] = cliente_activo if cliente_activo else ""
-    
-    # Evitar pisar descripción
     if accion == "actualizar_proyecto" and not _parece_descripcion_de_trabajo(texto_original):
         datos = dict(datos)
         datos["descripcion"] = ""
-    
     return datos
 
 def _es_escape(texto: str) -> bool:
@@ -120,8 +109,16 @@ def _es_escape(texto: str) -> bool:
     return t in _PALABRAS_ESCAPE or any(t.startswith(p) for p in _PALABRAS_ESCAPE)
 
 def _es_confirmacion(texto: str) -> bool:
+    """Detecta confirmación de forma flexible, incluso desde audio transcrito."""
     t = texto.strip().lower()
-    return any(t == p or t.startswith(p + " ") or t.startswith(p + ",") for p in _PALABRAS_CONFIRMACION)
+    for p in _PALABRAS_CONFIRMACION:
+        if t == p:
+            return True
+        if t.startswith(p + " ") or t.startswith(p + ",") or t.startswith(p + "."):
+            return True
+        if re.match(rf'^{p}\s*[,.;]\s*', t):
+            return True
+    return False
 
 def _es_respuesta_numerica_simple(texto: str) -> float | None:
     numeros = re.findall(r'\d+(?:\.\d+)?', texto)
@@ -178,18 +175,17 @@ def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_exis
         contexto_historial = "[Historial de los últimos mensajes]:\n"
         for msg in historial_mensajes[-12:]:
             contexto_historial += f"- {msg}\n"
-    
+
     texto_analisis = texto
     if texto.lower() in ['si', 'sí', 'esta bien', 'ok', 'okey', 'correcto', 'bien', 'confirmo']:
         for msg in reversed(historial_mensajes[-5:]):
             if "Nuevo proyecto guardado" in msg or "proyecto" in msg or "¿" in msg:
                 texto_analisis = f"CONFIRMACIÓN: El jefe dice '{texto}'. Esto confirma el proyecto/pregunta anterior. NO CREES NUEVO PROYECTO, solo confirma."
                 break
-    
-    # Detectar cierre de proyecto en el texto
+
     if any(p in texto.lower() for p in _PALABRAS_CIERRE):
         texto_analisis = f"CIERRE DE PROYECTO: El jefe dice '{texto}'. Esto indica que el proyecto ha sido entregado o completado. DEBES usar la acción 'cerrar_proyecto'."
-    
+
     contexto_actual = f"\n[Mensaje actual del jefe]: {texto_analisis}"
     if cliente_activo:
         contexto_actual += f"\n[Cliente activo actual]: {cliente_activo}"
@@ -202,18 +198,17 @@ CLIENTES REGISTRADOS (usa estos nombres EXACTOS cuando reconozcas a un cliente):
 {', '.join(clientes_reales) if clientes_reales else 'Aún no hay clientes registrados.'}
 
 REGLAS ESTRICTAS (LEE CON ATENCIÓN):
-1. **CIERRE DE PROYECTO**: Si el jefe dice "entregué", "entregue", "terminé", "termine", "completé", "complete", "ya se lo entregue", "ya me pago", "liquidar", "cerrar proyecto", DEBES usar la acción "cerrar_proyecto". Esto significa que el proyecto se ha completado y el jefe ha recibido el pago o está listo para liquidarlo.
+1. **CIERRE DE PROYECTO**: Si el jefe dice "entregué", "entregue", "terminé", "termine", "completé", "complete", "ya se lo entregue", "ya me pago", "liquidar", "cerrar proyecto", DEBES usar la acción "cerrar_proyecto".
 2. **PREGUNTAR ANTES DE ACTUAR**: Si el jefe dice "ya me pago" y hay un saldo pendiente, DEBES preguntar: "Jefe, ¿te refieres a que [cliente] ya pagó los [monto] restantes del proyecto '[proyecto]'?" antes de liquidar.
-3. **CONTEXTO DE CLIENTE**: Si el jefe no menciona el cliente pero está claro por el contexto (ej: el cliente activo es Diana Guizar), usa ese cliente.
+3. **CONTEXTO DE CLIENTE**: Si el jefe no menciona el cliente pero está claro por el contexto, usa ese cliente.
 4. **EXPLICAR ESTADO**: Si el jefe pregunta "¿por qué está liquidado?", "¿por qué cancelado?", usa la acción "explicar_estado".
-5. **DETECCIÓN DE NOMBRES SIMILARES**: Antes de registrar un cliente nuevo, si el nombre mencionado comparte apellido con uno existente, pregunta.
-6. **REGISTRO DE CLIENTE**: Extrae toda la información: dirección, teléfono, trabajo, monto (si lo da). Si falta el monto, pregunta.
-7. **NOMBRE DEL PROYECTO**: Debe ser el NOMBRE DEL TRABAJO específico, NO el nombre del cliente.
-8. **PRESUPUESTO ENVIADO**: Incluye el monto si lo da. NO reescribas "descripcion" solo porque mencionó un monto.
-9. **CONSULTAS**: "qué clientes tengo" → "consultar" tipo "activos". "liquidados" → "liquidados". "cancelados" → "cancelados".
-10. **BORRAR**: "borra", "elimina", "quiero eliminar clientes" → "iniciar_borrado".
-11. **GASTOS**: "gasté" sin cliente → "registrar_gasto". "gastos" → "consultar_gastos".
-12. **FUSIONAR**: "fusiona", "combina", "une" + proyectos del mismo cliente → "fusionar_proyectos".
+5. **REGISTRO DE CLIENTE**: Extrae toda la información: dirección, teléfono, trabajo, monto (si lo da). Si falta el monto, pregunta.
+6. **NOMBRE DEL PROYECTO**: Debe ser el NOMBRE DEL TRABAJO específico, NO el nombre del cliente.
+7. **PRESUPUESTO ENVIADO**: Incluye el monto si lo da. NO reescribas "descripcion" solo porque mencionó un monto.
+8. **CONSULTAS**: "qué clientes tengo" → "consultar" tipo "activos". "liquidados" → "liquidados". "cancelados" → "cancelados".
+9. **BORRAR**: "borra", "elimina", "quiero eliminar clientes" → "iniciar_borrado".
+10. **GASTOS**: "gasté" sin cliente → "registrar_gasto". "gastos" → "consultar_gastos".
+11. **FUSIONAR**: "fusiona", "combina", "une" + proyectos del mismo cliente → "fusionar_proyectos".
 
 Responde SOLO con JSON:
 {{
@@ -246,7 +241,7 @@ Responde ÚNICAMENTE con el JSON."""
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1
     )
-    
+
     texto_respuesta = response.choices[0].message.content
     texto_limpio = texto_respuesta.replace("```json", "").replace("```", "").strip()
     try:
@@ -1203,32 +1198,30 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
             await update.message.reply_text(msg, parse_mode='Markdown')
             return True
 
-    # ===== CERRAR PROYECTO (NUEVA ACCIÓN) =====
+    # ===== CERRAR PROYECTO =====
     if accion == "cerrar_proyecto":
         nombre_cliente = datos.get("cliente", cliente_activo if cliente_activo else "")
         if not nombre_cliente or nombre_cliente == "Desconocido":
             await update.message.reply_text("⚠️ ¿De qué cliente quieres cerrar el proyecto, jefe?")
             return True
-        
+
         conn = get_db_connection()
         cur = conn.cursor()
         proyectos = obtener_proyectos_activos(cur, nombre_cliente)
         cur.close(); conn.close()
-        
+
         if not proyectos:
             await update.message.reply_text(f"⚠️ No encontré proyectos activos para {nombre_cliente}, jefe.")
             return False
-        
+
         if len(proyectos) == 1:
             pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat, pres_comp, fecha_pres, tel, dir, notas = proyectos[0]
             saldo = total - pagado
-            
+
             if saldo <= 0:
-                # Ya está liquidado, solo confirmar
                 await update.message.reply_text(f"✅ El proyecto '{nc}' de {nombre_cliente} ya está liquidado (saldo: ${saldo:.2f}).")
                 return False
-            
-            # Preguntar confirmación
+
             await update.message.reply_text(
                 f"🤔 Jefe, el proyecto '{nc}' de **{nombre_cliente}** tiene un saldo pendiente de **${saldo:.2f}**.\n\n"
                 f"¿Ya recibiste el pago completo? Responde 'SÍ' para liquidarlo o 'NO' para especificar el monto."
@@ -1503,7 +1496,6 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         if not isinstance(acciones, list) or not acciones:
             acciones = [datos_completo]
 
-        # Pasar cliente_activo a la función de corrección
         acciones = [_corregir_accion_con_texto(a, texto_original, cliente_activo) for a in acciones]
 
         resumen_log = ", ".join(f"{a.get('accion','?')}" for a in acciones)
@@ -1566,6 +1558,10 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await procesar_confirmacion_cierre(update, context, texto)
         elif estado == 'seleccion_cierre':
             await procesar_seleccion_cierre(update, context, texto)
+        elif estado == 'esperando_monto_cierre':
+            await procesar_monto_cierre(update, context, texto)
+        elif estado == 'esperando_confirmacion_monto_cierre':
+            await procesar_confirmacion_monto_cierre(update, context, texto)
         else:
             await procesar_texto(update, context, texto)
     elif update.message.voice:
@@ -2051,7 +2047,6 @@ async def procesar_confirmar_cliente_duplicado(update, context, respuesta):
                 cur.close(); conn.close()
                 await update.message.reply_text("✅ Proyecto registrado con el cliente existente, jefe.")
             elif accion_original == "marcar_presupuesto_enviado":
-                # Similar...
                 pass
             context.user_data['estado_espera'] = None
             context.user_data['datos_cliente_duplicado'] = None
@@ -2076,20 +2071,25 @@ async def procesar_confirmar_cliente_duplicado(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-# ===== NUEVAS FUNCIONES PARA CIERRE DE PROYECTO =====
+# ===== FUNCIONES PARA CIERRE DE PROYECTO (CORREGIDAS) =====
 async def procesar_confirmacion_cierre(update, context, respuesta):
     try:
         proyecto_id = context.user_data.get('cierre_proyecto_id')
         cliente_nombre = context.user_data.get('cierre_cliente')
         saldo = context.user_data.get('cierre_saldo', 0)
-        
+
         if not proyecto_id or not cliente_nombre:
             await update.message.reply_text("⚠️ No tengo datos en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        
+
+        # Limpiar estado ANTES de procesar para evitar bucles
+        context.user_data['estado_espera'] = None
+        context.user_data['cierre_proyecto_id'] = None
+        context.user_data['cierre_cliente'] = None
+        context.user_data['cierre_saldo'] = None
+
         if _es_confirmacion(respuesta):
-            # Registrar pago del saldo restante
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("SELECT monto_total, monto_pagado, nombre_corto FROM proyectos WHERE id = %s", (proyecto_id,))
@@ -2108,17 +2108,14 @@ async def procesar_confirmacion_cierre(update, context, respuesta):
                 cur.close(); conn.close()
                 await update.message.reply_text("⚠️ No encontré el proyecto.")
         else:
-            # Preguntar cuánto se pagó
             await update.message.reply_text(
-                f"🤔 ¿Cuánto pagó {cliente_nombre}? Responde el monto (ej: '2000' o '2500')."
+                f"🤔 ¿Cuánto pagó {cliente_nombre}? Responde el monto (ej: '2000' o '2500') o '0' si no pagó nada."
             )
             context.user_data['estado_espera'] = 'esperando_monto_cierre'
-        
-        context.user_data['estado_espera'] = None
-        context.user_data['cierre_proyecto_id'] = None
-        context.user_data['cierre_cliente'] = None
-        context.user_data['cierre_saldo'] = None
-        
+            context.user_data['cierre_proyecto_id'] = proyecto_id
+            context.user_data['cierre_cliente'] = cliente_nombre
+            context.user_data['cierre_saldo'] = saldo
+
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
@@ -2131,7 +2128,7 @@ async def procesar_seleccion_cierre(update, context, respuesta):
             await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        
+
         numero = _es_respuesta_numerica_simple(respuesta)
         if numero is None or not numero.is_integer():
             await update.message.reply_text("⚠️ Responde con el número del proyecto.")
@@ -2140,15 +2137,15 @@ async def procesar_seleccion_cierre(update, context, respuesta):
         if idx < 0 or idx >= len(proyectos):
             await update.message.reply_text("⚠️ Número fuera de rango.")
             return
-        
+
         pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat, pres_comp, fecha_pres, tel, dir, notas = proyectos[idx]
         saldo = total - pagado
-        
+
         if saldo <= 0:
             await update.message.reply_text(f"✅ El proyecto '{nc}' ya está liquidado (saldo: ${saldo:.2f}).")
             context.user_data['estado_espera'] = None
             return
-        
+
         await update.message.reply_text(
             f"🤔 Jefe, el proyecto '{nc}' de **{cliente_nombre}** tiene un saldo pendiente de **${saldo:.2f}**.\n\n"
             f"¿Ya recibiste el pago completo? Responde 'SÍ' para liquidarlo o 'NO' para especificar el monto."
@@ -2157,7 +2154,7 @@ async def procesar_seleccion_cierre(update, context, respuesta):
         context.user_data['cierre_proyecto_id'] = pid
         context.user_data['cierre_cliente'] = cliente_nombre
         context.user_data['cierre_saldo'] = float(saldo)
-        
+
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
@@ -2167,17 +2164,17 @@ async def procesar_monto_cierre(update, context, respuesta):
         proyecto_id = context.user_data.get('cierre_proyecto_id')
         cliente_nombre = context.user_data.get('cierre_cliente')
         saldo = context.user_data.get('cierre_saldo', 0)
-        
+
         if not proyecto_id or not cliente_nombre:
             await update.message.reply_text("⚠️ No tengo datos en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        
+
         monto = _es_respuesta_numerica_simple(respuesta)
-        if monto is None or monto <= 0:
+        if monto is None or monto < 0:
             await update.message.reply_text("⚠️ Responde un monto válido (ej: '2000' o '2500').")
             return
-        
+
         if monto > saldo:
             await update.message.reply_text(
                 f"⚠️ El saldo pendiente es de ${saldo:.2f}, pero me dices que pagó ${monto:.2f}.\n"
@@ -2186,7 +2183,7 @@ async def procesar_monto_cierre(update, context, respuesta):
             context.user_data['estado_espera'] = 'esperando_confirmacion_monto_cierre'
             context.user_data['monto_cierre'] = monto
             return
-        
+
         # Registrar pago parcial
         conn = get_db_connection()
         cur = conn.cursor()
@@ -2195,7 +2192,7 @@ async def procesar_monto_cierre(update, context, respuesta):
         if row:
             pagado, nc = row
             nuevo_pagado = float(pagado) + monto
-            if nuevo_pagado >= float(row[0] + saldo):  # Si se completa
+            if nuevo_pagado >= saldo:
                 nuevo_estado = 'Liquidado'
                 mensaje = f"✅ Proyecto **{nc}** de **{cliente_nombre}** LIQUIDADO con pago de ${monto:.2f}."
             else:
@@ -2208,12 +2205,12 @@ async def procesar_monto_cierre(update, context, respuesta):
         else:
             cur.close(); conn.close()
             await update.message.reply_text("⚠️ No encontré el proyecto.")
-        
+
         context.user_data['estado_espera'] = None
         context.user_data['cierre_proyecto_id'] = None
         context.user_data['cierre_cliente'] = None
         context.user_data['cierre_saldo'] = None
-        
+
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
@@ -2223,12 +2220,12 @@ async def procesar_confirmacion_monto_cierre(update, context, respuesta):
         proyecto_id = context.user_data.get('cierre_proyecto_id')
         cliente_nombre = context.user_data.get('cierre_cliente')
         monto = context.user_data.get('monto_cierre', 0)
-        
+
         if not proyecto_id or not cliente_nombre:
             await update.message.reply_text("⚠️ No tengo datos en memoria, jefe.")
             context.user_data['estado_espera'] = None
             return
-        
+
         if _es_confirmacion(respuesta):
             conn = get_db_connection()
             cur = conn.cursor()
@@ -2246,13 +2243,13 @@ async def procesar_confirmacion_monto_cierre(update, context, respuesta):
                 await update.message.reply_text("⚠️ No encontré el proyecto.")
         else:
             await update.message.reply_text("✅ Operación cancelada, jefe.")
-        
+
         context.user_data['estado_espera'] = None
         context.user_data['cierre_proyecto_id'] = None
         context.user_data['cierre_cliente'] = None
         context.user_data['cierre_saldo'] = None
         context.user_data['monto_cierre'] = None
-        
+
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
@@ -2287,5 +2284,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot CORREGIDO: detección de cierre de proyecto, preguntas proactivas, flujo de liquidación.")
+    print("🤖 Bot COMPLETO: confirmación desde audio, cierre de proyecto, liquidación, y todas las correcciones.")
     app.run_polling(drop_pending_updates=True)
