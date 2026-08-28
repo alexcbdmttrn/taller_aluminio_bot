@@ -57,15 +57,13 @@ CLIENTES REGISTRADOS (usa estos nombres EXACTOS cuando reconozcas a un cliente):
 {', '.join(clientes_reales) if clientes_reales else 'Aún no hay clientes registrados.'}
 
 REGLAS ESTRICTAS (LEE CON ATENCIÓN):
-1. **PREGUNTA DATOS FALTANTES**: Si el jefe registra un cliente/proyecto y falta información como el monto del presupuesto, usa accion "preguntar". Pero si el jefe dice "pendiente", "no sé", "después", "no hay monto" o "sin presupuesto", interpreta eso como monto = 0 y registra el proyecto igual.
-2. **CONFIRMACIONES**: "si", "sí", "esta bien", "ok" → NO crees nuevo proyecto, solo confirma lo anterior.
-3. **NUEVO PROYECTO**: "registra", "anota", "nuevo" + cliente + trabajo. Si falta monto, pregunta una sola vez. Si el jefe responde "pendiente", "no sé" o similar, guarda con monto 0.
-4. **PRESUPUESTO ENVIADO**: "ya mandé presupuesto" → accion "marcar_presupuesto_enviado". Actualiza estado a "Presupuesto enviado".
-5. **PAGO/ANTICIPO**: "pago", "anticipo" + cliente → accion "registrar_pago". Si no da monto, pregunta.
-6. **MATERIAL**: "compré material" + cliente → accion "registrar_compra_material". Si no da costo, pregunta.
-7. **CONSULTAS**: "qué clientes tengo" → "consultar" tipo "activos". "liquidados" → tipo "liquidados". "cancelados" → tipo "cancelados".
-8. **BORRAR**: "borra", "elimina", "quiero eliminar clientes" → accion "iniciar_borrado".
-9. **GASTOS**: "gasté" sin cliente → "registrar_gasto". "gastos" → "consultar_gastos".
+1. **REGISTRO DE CLIENTE**: Cuando el jefe diga "registra a [nombre]", extrae toda la información que puedas: dirección, teléfono, trabajo, monto (si lo da). Si falta el monto del presupuesto, pregunta una sola vez. Si el jefe responde "pendiente", "no sé" o similar, guarda con monto 0.
+2. **PRESUPUESTO ENVIADO**: Cuando el jefe diga "ya mandé presupuesto", "entregué presupuesto", "ya cotice", etc., DEBES interpretar que también puede venir un monto y una descripción del trabajo en el mismo mensaje. Ej: "ya envie presupuesto a abigail de 10000 pesos, son 3 ventanas de aluminio negro con cristal claro" → eso es una sola acción: marcar presupuesto enviado Y actualizar el monto a 10000 Y actualizar la descripción del proyecto.
+3. **ACTUALIZACIONES**: Si el jefe actualiza el monto, la descripción o cualquier dato, debes usar la acción correspondiente (actualizar_proyecto) y pasar todos los campos que se mencionan.
+4. **CONSULTAS**: "qué clientes tengo" → "consultar" tipo "activos". "liquidados" → "liquidados". "cancelados" → "cancelados".
+5. **BORRAR**: "borra", "elimina", "quiero eliminar clientes" → "iniciar_borrado".
+6. **GASTOS**: "gasté" sin cliente → "registrar_gasto". "gastos" → "consultar_gastos".
+7. **CONFIRMACIONES**: "si", "sí", "esta bien" → NO crees nuevo proyecto, solo confirma lo anterior.
 
 Responde SOLO con JSON:
 {{
@@ -73,13 +71,15 @@ Responde SOLO con JSON:
   "cliente": "nombre",
   "nombre_corto": "nombre breve (máx 30 caracteres)",
   "monto": numero o 0,
-  "descripcion": "detalles",
+  "descripcion": "detalles completos del proyecto (trabajo, materiales, etc.)",
   "notas": "",
+  "telefono": "",
+  "direccion": "",
   "estado": "Pendiente de cotizar" | "Presupuesto enviado" | "Aceptado" | "En proceso" | "Por cobrar" | "Liquidado" | "Cancelado",
   "tipo_borrado": "activos" | "cancelados" | "liquidados" | "gastos",
   "tipo_consulta": "activos" | "cancelados" | "liquidados" | "deudores" | "pendientes" | "todos",
   "pregunta": "texto de la pregunta (solo si accion es preguntar)",
-  "resumen": "frase corta"
+  "resumen": "frase corta de lo que harás"
 }}
 
 {contexto_historial}
@@ -297,17 +297,34 @@ def actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, e
     """, tuple(params))
     return True, []
 
-def marcar_presupuesto_enviado(cur, cliente_nombre, nombre_corto):
-    proyecto_id, candidatos = resolver_proyecto_activo(cur, cliente_nombre, nombre_corto)
+def marcar_presupuesto_enviado(cur, cliente_nombre, nombre_corto, monto=None, descripcion=None, telefono=None, direccion=None, notas=None):
+    # Primero actualizar el cliente si se dan datos
+    if telefono or direccion or notas:
+        buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
+    
+    # Buscar el proyecto
+    proyecto_id, candidatos = resolver_proyecto_activo(cur, cliente_nombre, nombre_corto or descripcion)
     if proyecto_id is None:
         return False, candidatos
-    cur.execute("""
+    
+    # Preparar actualización
+    updates = ["presupuesto_enviado = TRUE", "fecha_presupuesto = CURRENT_TIMESTAMP", "estado = 'Presupuesto enviado'"]
+    params = []
+    if monto is not None and monto > 0:
+        updates.append("monto_total = %s")
+        params.append(monto)
+    if descripcion:
+        updates.append("descripcion = COALESCE(%s, descripcion)")
+        params.append(descripcion)
+    if notas:
+        updates.append("notas_adicionales = COALESCE(%s, notas_adicionales)")
+        params.append(notas)
+    params.append(proyecto_id)
+    cur.execute(f"""
         UPDATE proyectos 
-        SET presupuesto_enviado = TRUE, 
-            fecha_presupuesto = CURRENT_TIMESTAMP,
-            estado = 'Presupuesto enviado'
+        SET {', '.join(updates)}
         WHERE id = %s
-    """, (proyecto_id,))
+    """, tuple(params))
     return True, []
 
 def cancelar_proyecto_especifico(cur, cliente_nombre, nombre_corto):
@@ -440,11 +457,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['cliente_activo'] = ""
     await update.message.reply_text(
         "¡Hola, jefe! 🛠️ Su secretario está listo.\n\n"
-        "Solo hable conmigo como lo haría con su asistente.\n"
+        "Hable conmigo como lo haría con su asistente.\n"
         "Ejemplos:\n"
-        "- 'Registra a Juan Pérez, calle siempre viva 123, 2 ventanas negras'\n"
-        "- 'El presupuesto es de 8000'\n"
-        "- 'Ya mandé presupuesto a Juan'\n"
+        "- 'Registra a Juan Pérez, calle siempre viva 123, tel 5551234, 2 ventanas negras'\n"
+        "- 'El presupuesto es de 8000' (si ya registró el cliente)\n"
+        "- 'Ya mandé presupuesto a Juan por 8000, son 3 ventanas blancas'\n"
         "- 'Quiero eliminar clientes'\n"
         "Si no tiene el presupuesto, diga 'pendiente' y lo guardo igual."
     )
@@ -604,7 +621,7 @@ async def comando_gastos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
 
-# ==================== MANEJO DE BORRADO GRANULAR ====================
+# ==================== MANEJO DE BORRADO ====================
 async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, tipo=None, cliente=None):
     if tipo is None:
         await update.message.reply_text(
@@ -895,13 +912,25 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
     conn = get_db_connection()
     cur = conn.cursor()
 
+    # ===== MARCAR PRESUPUESTO ENVIADO (CON ACTUALIZACIONES ADICIONALES) =====
     if accion == "marcar_presupuesto_enviado":
-        marcado, candidatos = marcar_presupuesto_enviado(cur, cliente_nombre, nombre_corto)
-        if not marcado and not candidatos:
-            marcado, candidatos = marcar_presupuesto_enviado(cur, cliente_nombre, descripcion)
+        # Pasamos todos los datos que la IA haya extraído
+        marcado, candidatos = marcar_presupuesto_enviado(
+            cur, cliente_nombre, nombre_corto,
+            monto=monto if monto > 0 else None,
+            descripcion=descripcion if descripcion else None,
+            telefono=telefono,
+            direccion=direccion,
+            notas=notas
+        )
         if marcado:
             conn.commit(); cur.close(); conn.close()
-            await update.message.reply_text(f"📋 Presupuesto marcado como ENVIADO para {cliente_nombre}, jefe.")
+            msg = f"📋 Presupuesto marcado como ENVIADO para {cliente_nombre}, jefe."
+            if monto > 0:
+                msg += f" 💰 Monto actualizado a ${monto:.2f}."
+            if descripcion:
+                msg += f" 📝 Detalle actualizado."
+            await update.message.reply_text(msg)
             return False
         elif candidatos:
             cur.close(); conn.close()
@@ -912,6 +941,10 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
             context.user_data['estado_espera'] = 'seleccion_presupuesto'
             context.user_data['candidatos_presupuesto'] = candidatos
             context.user_data['cliente_presupuesto'] = cliente_nombre
+            context.user_data['datos_presupuesto'] = {
+                'monto': monto, 'descripcion': descripcion,
+                'telefono': telefono, 'direccion': direccion, 'notas': notas
+            }
             await update.message.reply_text(msg, parse_mode='Markdown')
             return True
         else:
@@ -919,20 +952,20 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
             await update.message.reply_text(f"⚠️ No encontré proyectos activos para {cliente_nombre}, jefe.")
             return False
 
+    # ===== REGISTRAR PROYECTO =====
     if accion == "registrar_proyecto":
-        # Si el monto es 0 y la descripción contiene "pendiente", es intencional
-        if monto == 0 and "pendiente" in descripcion.lower():
-            estado = "Pendiente de cotizar"
+        # Guardar cliente con todos los datos
         buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
         cliente_id = buscar_o_crear_cliente(cur, cliente_nombre)
         registrar_proyecto(cur, cliente_id, nombre_corto, descripcion or nombre_corto, monto, estado, notas)
         conn.commit(); cur.close(); conn.close()
         respuesta = f"✅ Nuevo proyecto guardado, jefe: {resumen_ia}\n Total: ${monto:.2f}"
         if monto == 0:
-            respuesta += "\n\n📌 Recuerda que puedes actualizar el monto después o poner 'pendiente' si no lo tienes."
+            respuesta += "\n\n📌 Recuerda que puedes actualizar el monto después o decir 'pendiente' si no lo tienes."
         await update.message.reply_text(respuesta)
         return False
 
+    # ===== ACTUALIZAR PROYECTO =====
     if accion == "actualizar_proyecto":
         buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
         actualizado, candidatos = actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, estado, notas)
@@ -961,6 +994,7 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
             await update.message.reply_text(f"⚠️ No encontré proyectos activos para {cliente_nombre}, jefe.")
             return False
 
+    # ===== CANCELAR PROYECTO =====
     if accion == "cancelar_proyecto":
         proyectos = obtener_proyectos_activos(cur, cliente_nombre)
         cur.close(); conn.close()
@@ -989,6 +1023,7 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
             await update.message.reply_text(msg, parse_mode='Markdown')
             return True
 
+    # ===== REGISTRAR PAGO =====
     if accion == "registrar_pago":
         buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion)
         _, msg_pago = registrar_pago(cur, cliente_nombre, monto)
@@ -997,6 +1032,7 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
         await update.message.reply_text(respuesta)
         return False
 
+    # ===== COMPRA DE MATERIAL =====
     if accion == "registrar_compra_material":
         if not cliente_nombre or cliente_nombre == "Desconocido":
             cur.close(); conn.close()
@@ -1035,6 +1071,7 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
             await update.message.reply_text(msg, parse_mode='Markdown')
             return True
 
+    # ===== GASTO GENERAL =====
     if accion == "registrar_gasto":
         registrar_gasto(cur, descripcion or resumen_ia, monto)
         conn.commit(); cur.close(); conn.close()
@@ -1253,6 +1290,7 @@ async def procesar_seleccion_presupuesto(update, context, respuesta):
     try:
         candidatos = context.user_data.get('candidatos_presupuesto', [])
         cliente_nombre = context.user_data.get('cliente_presupuesto', '')
+        datos = context.user_data.get('datos_presupuesto', {})
         if not candidatos:
             await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe.")
             context.user_data['estado_espera'] = None
@@ -1263,13 +1301,27 @@ async def procesar_seleccion_presupuesto(update, context, respuesta):
             return
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("UPDATE proyectos SET presupuesto_enviado = TRUE, fecha_presupuesto = CURRENT_TIMESTAMP WHERE id = %s", (pid,))
+        # Actualizar con los datos del presupuesto
+        cur.execute("""
+            UPDATE proyectos 
+            SET presupuesto_enviado = TRUE, 
+                fecha_presupuesto = CURRENT_TIMESTAMP,
+                estado = 'Presupuesto enviado',
+                monto_total = CASE WHEN %s > 0 THEN %s ELSE monto_total END,
+                descripcion = COALESCE(%s, descripcion),
+                notas_adicionales = COALESCE(%s, notas_adicionales)
+            WHERE id = %s
+        """, (datos.get('monto', 0), datos.get('monto', 0), datos.get('descripcion'), datos.get('notas'), pid))
+        # Actualizar cliente si se dieron datos
+        if datos.get('telefono') or datos.get('direccion'):
+            buscar_o_crear_cliente(cur, cliente_nombre, datos.get('telefono'), datos.get('direccion'))
         conn.commit()
         cur.close(); conn.close()
         await update.message.reply_text(f"📋 Presupuesto marcado como ENVIADO para {cliente_nombre}, jefe.")
         context.user_data['estado_espera'] = None
         context.user_data['candidatos_presupuesto'] = None
         context.user_data['cliente_presupuesto'] = None
+        context.user_data['datos_presupuesto'] = None
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
@@ -1337,5 +1389,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot CORREGIDO: interpreta 'pendiente', mantiene contexto, registra sin monto...")
+    print("🤖 Bot DEFINITIVO: registra y actualiza correctamente, con presupuesto y descripción. VERSION FINAL.")
     app.run_polling(drop_pending_updates=True)
