@@ -22,30 +22,33 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Zona horaria de México (CDMX)
-ZONA_HORARIA = pytz.timezone('America/Mexico_City')
+try:
+    ZONA_HORARIA = pytz.timezone('America/Mexico_City')
+except Exception:
+    ZONA_HORARIA = None
+
+def ahora_cdmx():
+    if ZONA_HORARIA:
+        return datetime.now(ZONA_HORARIA)
+    return datetime.utcnow() - timedelta(hours=6)
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-def ahora_cdmx():
-    """Devuelve la fecha/hora actual en zona horaria de México (CDMX)."""
-    return datetime.now(ZONA_HORARIA)
-
-# ==================== CONSTANTES PARA VALIDACIONES ====================
+# ==================== CONSTANTES ====================
 ACCIONES_VALIDAS = {
     "registrar_proyecto", "registrar_pago", "actualizar_proyecto",
     "marcar_presupuesto_enviado", "cancelar_proyecto", "iniciar_borrado",
     "consultar", "consultar_historial", "consultar_material", "consultar_presupuesto",
     "registrar_compra_material", "registrar_gasto", "consultar_gastos", "preguntar",
-    "fusionar_proyectos"
+    "fusionar_proyectos", "explicar_estado"
 }
 
 ACCIONES_QUE_REQUIEREN_CLIENTE = {
     "registrar_proyecto", "registrar_pago", "actualizar_proyecto",
     "marcar_presupuesto_enviado", "cancelar_proyecto",
     "consultar_material", "consultar_presupuesto", "registrar_compra_material",
-    "fusionar_proyectos"
+    "fusionar_proyectos", "explicar_estado"
 }
 
 _PALABRAS_PAGO = ("anticipo", "anticipó", "abono", "abonó", "ya pagó", "ya pago", "dio un pago")
@@ -58,6 +61,8 @@ _PALABRAS_ESCAPE = (
 _PALABRAS_CONFIRMACION = ("si", "sí", "yes", "sip", "va", "dale", "adelante", "confirmo", "correcto")
 
 _PALABRAS_DESCRIPCION_TRABAJO = ("ventana", "cancel", "puerta", "medida", "cristal", "aluminio", "barandal", "reja", "domo")
+
+_PALABRAS_ESTADO = ("liquidado", "cancelado", "aceptado", "proceso", "pendiente", "presupuesto")
 
 ORDEN_ESTADOS = ["Cancelado", "Pendiente de cotizar", "Presupuesto enviado",
                   "Aceptado", "En proceso", "Por cobrar", "Liquidado"]
@@ -84,7 +89,6 @@ def _corregir_accion_con_texto(datos: dict, texto_original: str) -> dict:
     if accion == "registrar_proyecto" and any(p in texto_low for p in _PALABRAS_PAGO):
         datos = dict(datos)
         datos["accion"] = "registrar_pago"
-    # Si la acción es actualizar y NO hay señales de descripción de trabajo, forzar descripcion vacía
     if accion == "actualizar_proyecto" and not _parece_descripcion_de_trabajo(texto_original):
         datos = dict(datos)
         datos["descripcion"] = ""
@@ -99,16 +103,12 @@ def _es_confirmacion(texto: str) -> bool:
     return any(t == p or t.startswith(p + " ") or t.startswith(p + ",") for p in _PALABRAS_CONFIRMACION)
 
 def _es_respuesta_numerica_simple(texto: str) -> float | None:
-    """Devuelve el número si el mensaje ES una respuesta numérica corta
-    (ej: '4500', '$4,500', '4500 pesos'), o None si es una frase con otro
-    propósito (aunque contenga dígitos, como una corrección o descripción)."""
-    t = texto.strip().lower()
-    t_limpio = t.replace('$', '').replace(',', '').replace('pesos', '').replace('peso', '').strip()
-    palabras = t_limpio.split()
-    if len(palabras) == 0 or len(palabras) > 2:
+    """Extrae un número de la respuesta del usuario usando regex."""
+    numeros = re.findall(r'\d+(?:\.\d+)?', texto)
+    if not numeros:
         return None
     try:
-        return float(palabras[0])
+        return float(numeros[0])
     except ValueError:
         return None
 
@@ -116,10 +116,7 @@ def _parece_descripcion_de_trabajo(texto_original: str) -> bool:
     t = texto_original.lower()
     return any(p in t for p in _PALABRAS_DESCRIPCION_TRABAJO)
 
-# ==================== ÚLTIMA LISTA (numeración persistente) ====================
 def _guardar_ultima_lista(context, items, tipo="proyectos"):
-    """items: lista de tuplas (id, cliente, nombre_corto, descripcion, monto, estado)
-    en el mismo orden en que se mostraron numeradas al jefe."""
     context.user_data['ultima_lista'] = {
         'tipo': tipo,
         'items': items,
@@ -127,14 +124,12 @@ def _guardar_ultima_lista(context, items, tipo="proyectos"):
     }
 
 def _resolver_numero_de_ultima_lista(context, texto: str):
-    """Si el texto menciona un número pequeño y hay una lista reciente (< 10 min),
-    devuelve el id correspondiente. Si no aplica, devuelve None."""
     ultima = context.user_data.get('ultima_lista')
     if not ultima:
         return None
     try:
         ts = datetime.fromisoformat(ultima['timestamp'])
-        if (ahora_cdmx() - ts).total_seconds() > 600:  # 10 minutos de vigencia
+        if (ahora_cdmx() - ts).total_seconds() > 600:
             return None
     except Exception:
         return None
@@ -182,26 +177,27 @@ def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_exis
 CLIENTES REGISTRADOS (usa estos nombres EXACTOS cuando reconozcas a un cliente):
 {', '.join(clientes_reales) if clientes_reales else 'Aún no hay clientes registrados.'}
 
-REGLAS ESTRICTAS:
-1. **REGISTRO DE CLIENTE**: Cuando el jefe diga "registra a [nombre]", extrae toda la información que puedas: dirección, teléfono, trabajo, monto (si lo da). Si falta el monto del presupuesto, pregunta una sola vez. Si el jefe responde "pendiente", "no sé" o similar, guarda con monto 0.
-2. **NOMBRE DEL PROYECTO (campo `nombre_corto`)**: Debe ser el NOMBRE DEL TRABAJO específico, NO el nombre del cliente. Ejemplos: "Ventana aluminio blanco", "Cancel baño", "3 ventanas negras".
-3. **PRESUPUESTO ENVIADO**: Cuando el jefe diga "ya mandé presupuesto", incluye el monto si lo da. **NO reescribas el campo "descripcion" solo porque mencionó un monto** — la descripción es el TRABAJO (materiales, medidas, tipo de pieza). Deja "descripcion" vacía en el JSON a menos que el jefe esté describiendo el trabajo en ese mismo mensaje.
-4. **ACTUALIZACIONES**: Si el jefe actualiza el monto, la descripción o cualquier dato, usa "actualizar_proyecto".
-5. **CONSULTAS**: "qué clientes tengo" → "consultar" tipo "activos". "liquidados" → "liquidados". "cancelados" → "cancelados".
-6. **BORRAR**: "borra", "elimina", "quiero eliminar clientes" → "iniciar_borrado".
-7. **GASTOS**: "gasté" sin cliente → "registrar_gasto". "gastos" → "consultar_gastos".
-8. **CONFIRMACIONES**: "si", "sí", "esta bien" → NO crees nuevo proyecto, solo confirma lo anterior.
-9. **FUSIONAR**: "fusiona", "combina", "une" + proyectos del mismo cliente → "fusionar_proyectos".
+REGLAS ESTRICTAS (LEE CON ATENCIÓN):
+1. **CONTEXTO DE CLIENTE**: Si el jefe pregunta sobre un cliente o proyecto sin mencionarlo explícitamente, usa el último cliente activo (cliente_activo) o el mencionado en el mensaje anterior. Ej: si dijo "Alex Guizar" y luego pregunta "¿por qué está liquidado?", asume que se refiere a Alex Guizar.
+2. **EXPLICAR ESTADO**: Si el jefe pregunta "¿por qué está liquidado?", "¿por qué cancelado?", etc., usa la acción "explicar_estado". Busca el proyecto del cliente y explica la lógica: "Jefe, aparece como liquidado porque el monto total es igual al monto pagado. Si aún no lo entregas, podemos cambiarlo a 'Por cobrar' o 'En proceso'." Ofrece opciones para corregir.
+3. **DETECCIÓN DE NOMBRES SIMILARES**: Antes de registrar un cliente nuevo, si el nombre mencionado tiene un apellido que coincide con algún cliente existente (ej: "Guizar" coincide con "Alex Guizar"), NO crees el cliente de inmediato. En su lugar, usa "preguntar" para consultar: "Jefe, ya tengo registrado a 'Alex Guizar'. ¿Te refieres a él o es otra persona?".
+4. **REGISTRO DE CLIENTE**: Cuando el jefe diga "registra a [nombre]", extrae toda la información: dirección, teléfono, trabajo, monto (si lo da). Si falta el monto del presupuesto, pregunta una sola vez. Si el jefe responde "pendiente", guarda con monto 0.
+5. **NOMBRE DEL PROYECTO (campo `nombre_corto`)**: Debe ser el NOMBRE DEL TRABAJO específico, NO el nombre del cliente.
+6. **PRESUPUESTO ENVIADO**: Incluye el monto si lo da. NO reescribas "descripcion" solo porque mencionó un monto.
+7. **CONSULTAS**: "qué clientes tengo" → "consultar" tipo "activos". "liquidados" → "liquidados". "cancelados" → "cancelados".
+8. **BORRAR**: "borra", "elimina", "quiero eliminar clientes" → "iniciar_borrado".
+9. **GASTOS**: "gasté" sin cliente → "registrar_gasto". "gastos" → "consultar_gastos".
+10. **FUSIONAR**: "fusiona", "combina", "une" + proyectos del mismo cliente → "fusionar_proyectos".
 
-Responde SOLO con este JSON (nota que "acciones" es una LISTA):
+Responde SOLO con JSON:
 {{
   "acciones": [
     {{
-      "accion": "registrar_proyecto" | "registrar_pago" | "actualizar_proyecto" | "marcar_presupuesto_enviado" | "cancelar_proyecto" | "iniciar_borrado" | "consultar" | "consultar_historial" | "consultar_material" | "consultar_presupuesto" | "registrar_compra_material" | "registrar_gasto" | "consultar_gastos" | "fusionar_proyectos" | "preguntar",
+      "accion": "registrar_proyecto" | "registrar_pago" | "actualizar_proyecto" | "marcar_presupuesto_enviado" | "cancelar_proyecto" | "iniciar_borrado" | "consultar" | "consultar_historial" | "consultar_material" | "consultar_presupuesto" | "registrar_compra_material" | "registrar_gasto" | "consultar_gastos" | "fusionar_proyectos" | "explicar_estado" | "preguntar",
       "cliente": "nombre",
-      "nombre_corto": "nombre breve del TRABAJO (ej: 'ventana aluminio', 'cancel baño')",
+      "nombre_corto": "nombre breve del TRABAJO",
       "monto": numero o 0,
-      "descripcion": "detalles completos del trabajo (solo si se describen en este mensaje)",
+      "descripcion": "detalles del trabajo (solo si se describe)",
       "notas": "",
       "telefono": "",
       "direccion": "",
@@ -211,7 +207,7 @@ Responde SOLO con este JSON (nota que "acciones" es una LISTA):
       "pregunta": "texto de la pregunta"
     }}
   ],
-  "resumen": "frase corta de TODO lo que harás en este mensaje"
+  "resumen": "frase corta"
 }}
 
 {contexto_historial}
@@ -267,22 +263,30 @@ def transcribir_audio(ruta_archivo):
 
 # ==================== BASE DE DATOS ====================
 def buscar_o_crear_cliente(cur, nombre_cliente, telefono="", direccion="", notas=""):
+    """
+    Busca cliente por nombre completo o por apellidos. Si encuentra un cliente existente
+    con el mismo apellido, devuelve (cliente_id, flag_duplicado, nombre_existente).
+    """
     nombre_cliente = nombre_cliente.lower().strip()
-    cur.execute("SELECT id FROM clientes WHERE unaccent(nombre) ILIKE unaccent(%s)", (f"%{nombre_cliente}%",))
-    cliente = cur.fetchone()
-    if cliente:
-        cliente_id = cliente[0]
-        if telefono or direccion or notas:
-            cur.execute("""UPDATE clientes SET 
-                           telefono = COALESCE(%s, telefono), 
-                           direccion = COALESCE(%s, direccion),
-                           notas_adicionales = COALESCE(%s, notas_adicionales)
-                           WHERE id = %s""", (telefono or None, direccion or None, notas or None, cliente_id))
-        return cliente_id
-    else:
-        cur.execute("INSERT INTO clientes (nombre, telefono, direccion, notas_adicionales) VALUES (%s, %s, %s, %s) RETURNING id", 
-                    (nombre_cliente, telefono or None, direccion or None, notas or None))
-        return cur.fetchone()[0]
+    # Buscar por nombre completo
+    cur.execute("SELECT id, nombre FROM clientes WHERE unaccent(nombre) ILIKE unaccent(%s)", (f"%{nombre_cliente}%",))
+    resultado = cur.fetchone()
+    if resultado:
+        return resultado[0], False, None
+
+    # Buscar por apellido (última palabra)
+    partes = nombre_cliente.split()
+    if len(partes) > 1:
+        apellido = partes[-1]
+        cur.execute("SELECT id, nombre FROM clientes WHERE unaccent(nombre) ILIKE unaccent(%s)", (f"%{apellido}%",))
+        coincidencia = cur.fetchone()
+        if coincidencia:
+            return None, True, coincidencia[1]
+
+    # Si no hay coincidencia, crear nuevo cliente
+    cur.execute("INSERT INTO clientes (nombre, telefono, direccion, notas_adicionales) VALUES (%s, %s, %s, %s) RETURNING id", 
+                (nombre_cliente, telefono or None, direccion or None, notas or None))
+    return cur.fetchone()[0], False, None
 
 def obtener_proyectos_activos_por_cliente(cur, cliente_nombre):
     cliente_nombre = cliente_nombre.lower().strip()
@@ -376,7 +380,6 @@ def borrar_gastos_por_ids(cur, ids):
     return cur.rowcount
 
 def fusionar_proyectos(cur, ids: list[int]):
-    """Combina 2+ proyectos en uno solo."""
     if len(ids) < 2:
         return None, "Necesito al menos 2 proyectos para fusionar."
     cur.execute("""
@@ -493,7 +496,6 @@ def actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, e
                "monto_total = CASE WHEN %s > 0 THEN %s ELSE monto_total END",
                "estado = COALESCE(%s, estado)", "notas_adicionales = COALESCE(%s, notas_adicionales)"]
     params = [nombre_corto or None, monto, monto, estado or None, notas or None]
-    # Solo actualizar descripcion si vino con contenido (no vacío)
     if descripcion and descripcion.strip():
         updates.append("descripcion = COALESCE(%s, descripcion)")
         params.append(descripcion)
@@ -513,10 +515,12 @@ def actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, e
 def marcar_presupuesto_enviado(cur, cliente_nombre, nombre_corto, monto=None, descripcion=None, telefono=None, direccion=None, notas=None):
     cliente_nombre = cliente_nombre.lower().strip()
     if telefono or direccion or notas:
-        buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
+        cliente_id, duplicado, nombre_existente = buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
+        if duplicado:
+            return False, None, duplicado, nombre_existente
     proyecto_id, candidatos = resolver_proyecto_activo(cur, cliente_nombre, nombre_corto or descripcion)
     if proyecto_id is None:
-        return False, candidatos
+        return False, candidatos, False, None
     updates = ["presupuesto_enviado = TRUE", "fecha_presupuesto = CURRENT_TIMESTAMP", "estado = 'Presupuesto enviado'"]
     params = []
     if monto is not None and monto > 0:
@@ -534,7 +538,7 @@ def marcar_presupuesto_enviado(cur, cliente_nombre, nombre_corto, monto=None, de
         SET {', '.join(updates)}
         WHERE id = %s
     """, tuple(params))
-    return True, []
+    return True, [], False, None
 
 def cancelar_proyecto_especifico(cur, cliente_nombre, nombre_corto):
     cliente_nombre = cliente_nombre.lower().strip()
@@ -962,7 +966,6 @@ async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAU
         if resp == 'todos':
             ids = [int(item[0]) for item in items if str(item[0]).isdigit()]
         else:
-            # Usar _es_respuesta_numerica_simple para evitar números falsos
             numero = _es_respuesta_numerica_simple(respuesta)
             if numero is not None and numero.is_integer():
                 idx = int(numero) - 1
@@ -972,7 +975,6 @@ async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAU
                     await update.message.reply_text("⚠️ Número fuera de rango. Intenta de nuevo.")
                     return
             else:
-                # Intentar con comas
                 numeros = re.findall(r'\b\d+\b', respuesta)
                 if not numeros:
                     await update.message.reply_text("⚠️ No entendí. Escribe números separados por comas (ej: 1,3,5) o 'todos'.")
@@ -1135,11 +1137,55 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
                 msg += f"   📌 Notas: {notas}\n"
             msg += f"   💰 Total: ${t:.2f} | Pagado: ${p:.2f} | Saldo: ${pendiente:.2f}\n"
             msg += f"   📌 Estado: {e} | {pres_icon} Presupuesto | {mat_icon} Material\n\n"
-        # Guardar lista para edición por número
         items_guardar = [(p[1] if len(p)>1 else None, p[0] if len(p)>0 else None, p[1] if len(p)>1 else None, p[2] if len(p)>2 else None, p[3] if len(p)>3 else None, p[5] if len(p)>5 else None) for p in proyectos]
         _guardar_ultima_lista(context, items_guardar, tipo="consulta")
         await update.message.reply_text(msg, parse_mode='Markdown')
         return False
+
+    if accion == "explicar_estado":
+        nombre_cliente = datos.get("cliente", cliente_activo if cliente_activo else "")
+        if not nombre_cliente or nombre_cliente == "Desconocido":
+            await update.message.reply_text("⚠️ ¿De qué cliente quieres que explique el estado, jefe?")
+            return True
+        conn = get_db_connection()
+        cur = conn.cursor()
+        proyectos = obtener_proyectos_activos(cur, nombre_cliente)
+        cur.close(); conn.close()
+        if not proyectos:
+            await update.message.reply_text(f"⚠️ No encontré proyectos activos para {nombre_cliente}, jefe.")
+            return False
+        if len(proyectos) == 1:
+            pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat, pres_comp, fecha_pres, tel, dir, notas = proyectos[0]
+            if estado == "Liquidado":
+                explicacion = (
+                    f"📊 **Explicación del estado 'Liquidado' para {nombre_cliente}:**\n\n"
+                    f"El proyecto aparece como **Liquidado** porque el **monto total (${total:.2f})** "
+                    f"es igual al **monto pagado (${pagado:.2f})**.\n\n"
+                    f"El sistema lo marca automáticamente así cuando el saldo es $0.00.\n"
+                    f"Si aún no has entregado el trabajo, puedes cambiar el estado a:\n"
+                    f"- 'Por cobrar' (si falta cobrar algo)\n"
+                    f"- 'En proceso' (si está en fabricación)\n\n"
+                    f"¿Quieres que lo actualice a otro estado?"
+                )
+                await update.message.reply_text(explicacion, parse_mode='Markdown')
+                context.user_data['estado_espera'] = 'esperando_cambio_estado'
+                context.user_data['cliente_cambio_estado'] = nombre_cliente
+                context.user_data['proyecto_cambio_estado'] = pid
+                return True
+            else:
+                await update.message.reply_text(f"ℹ️ El proyecto de {nombre_cliente} está en estado **{estado}**. No hay nada inusual que explicar.")
+                return False
+        else:
+            # múltiples proyectos, preguntar cuál
+            msg = f"👤 **{nombre_cliente}** tiene varios proyectos activos. ¿Cuál quieres revisar?\n\n"
+            for i, p in enumerate(proyectos, 1):
+                msg += f"{i}. *{p[1] or 'Proyecto'}* - ${p[3]:.2f} ({p[5]})\n"
+            msg += "\nResponde el número."
+            context.user_data['estado_espera'] = 'seleccion_explicar_estado'
+            context.user_data['proyectos_explicar'] = proyectos
+            context.user_data['cliente_explicar'] = nombre_cliente
+            await update.message.reply_text(msg, parse_mode='Markdown')
+            return True
 
     if accion == "iniciar_borrado":
         tipo = datos.get("tipo_borrado")
@@ -1161,11 +1207,7 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
     if cliente_nombre != "Desconocido" and cliente_nombre != cliente_activo:
         context.user_data['cliente_activo'] = cliente_nombre.lower()
 
-    # Verificar si hay un proyecto forzado por número de la última lista
     proyecto_id_forzado = context.user_data.get('proyecto_id_forzado')
-    if proyecto_id_forzado:
-        # Usamos ese ID para actualizar directamente
-        pass
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -1193,7 +1235,7 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
 
     # ===== MARCAR PRESUPUESTO ENVIADO =====
     if accion == "marcar_presupuesto_enviado":
-        marcado, candidatos = marcar_presupuesto_enviado(
+        marcado, candidatos, duplicado, nombre_existente = marcar_presupuesto_enviado(
             cur, cliente_nombre, nombre_corto,
             monto=monto if monto > 0 else None,
             descripcion=descripcion if descripcion else None,
@@ -1201,6 +1243,18 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
             direccion=direccion,
             notas=notas
         )
+        if duplicado:
+            cur.close(); conn.close()
+            await update.message.reply_text(
+                f"🤔 Jefe, ya tengo registrado a **{nombre_existente}**. ¿Te refieres a él o es otra persona?\n"
+                "Responde 'sí' para usar el existente, o 'no' para crear uno nuevo."
+            )
+            context.user_data['estado_espera'] = 'confirmar_cliente_duplicado'
+            context.user_data['datos_cliente_duplicado'] = {
+                'cliente': cliente_nombre, 'telefono': telefono, 'direccion': direccion, 'notas': notas,
+                'accion': accion, 'datos': datos
+            }
+            return True
         if marcado:
             conn.commit(); cur.close(); conn.close()
             msg = f"📋 Presupuesto marcado como ENVIADO para {cliente_nombre}, jefe."
@@ -1232,8 +1286,19 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
 
     # ===== REGISTRAR PROYECTO =====
     if accion == "registrar_proyecto":
-        buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
-        cliente_id = buscar_o_crear_cliente(cur, cliente_nombre)
+        cliente_id, duplicado, nombre_existente = buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
+        if duplicado:
+            cur.close(); conn.close()
+            await update.message.reply_text(
+                f"🤔 Jefe, ya tengo registrado a **{nombre_existente}**. ¿Te refieres a él o es otra persona?\n"
+                "Responde 'sí' para usar el existente, o 'no' para crear uno nuevo."
+            )
+            context.user_data['estado_espera'] = 'confirmar_cliente_duplicado'
+            context.user_data['datos_cliente_duplicado'] = {
+                'cliente': cliente_nombre, 'telefono': telefono, 'direccion': direccion, 'notas': notas,
+                'accion': accion, 'datos': datos
+            }
+            return True
         registrar_proyecto(cur, cliente_id, nombre_corto, descripcion or nombre_corto, monto, estado, notas)
         conn.commit(); cur.close(); conn.close()
         respuesta = f"✅ Nuevo proyecto guardado, jefe: {resumen_ia}\n Total: ${monto:.2f}"
@@ -1386,7 +1451,6 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
             historial = historial[-15:]
         context.user_data['historial'] = historial
 
-        # Verificar si hay un patrón de edición por número antes de llamar a la IA
         match = _PATRON_EDITAR_POR_NUMERO.search(texto_original.lower())
         if match:
             proyecto_id = _resolver_numero_de_ultima_lista(context, texto_original)
@@ -1449,6 +1513,12 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await procesar_seleccion_pago(update, context, texto)
         elif estado == 'seleccion_fusion':
             await procesar_seleccion_fusion(update, context, texto)
+        elif estado == 'seleccion_explicar_estado':
+            await procesar_seleccion_explicar_estado(update, context, texto)
+        elif estado == 'confirmar_cliente_duplicado':
+            await procesar_confirmar_cliente_duplicado(update, context, texto)
+        elif estado == 'esperando_cambio_estado':
+            await procesar_cambio_estado(update, context, texto)
         else:
             await procesar_texto(update, context, texto)
     elif update.message.voice:
@@ -1482,7 +1552,6 @@ async def procesar_seleccion_material(update, context, respuesta):
         if resp_lower in ['todos', 'todo', 'ambos', 'todas']:
             seleccion = 'todos'
         else:
-            # Usar _es_respuesta_numerica_simple
             numero = _es_respuesta_numerica_simple(respuesta)
             if numero is not None and numero.is_integer():
                 idx = int(numero) - 1
@@ -1536,6 +1605,7 @@ async def procesar_costo_material(update, context, respuesta):
             await update.message.reply_text("⚠️ No tengo proyecto en memoria.")
             context.user_data['estado_espera'] = None
             return
+
         resp_lower = respuesta.lower().strip()
         if resp_lower.startswith('no'):
             conn = get_db_connection()
@@ -1544,27 +1614,32 @@ async def procesar_costo_material(update, context, respuesta):
             conn.commit()
             cur.close(); conn.close()
             await update.message.reply_text("✅ Material marcado como comprado sin costo, jefe.")
-        else:
-            costo = _es_respuesta_numerica_simple(respuesta)
-            if costo is not None:
-                conn = get_db_connection()
-                cur = conn.cursor()
-                marcar_material_comprado(cur, proyecto_id, costo)
-                conn.commit()
-                cur.close(); conn.close()
-                await update.message.reply_text(f"✅ Material marcado con costo de ${costo:.2f}, jefe.")
-            else:
-                # No es un número simple: probablemente el jefe cambió de tema
-                await update.message.reply_text(
-                    "🤔 Eso no es un monto. Voy a procesar tu mensaje como una nueva "
-                    "instrucción, pero recuerda que sigo esperando el costo del "
-                    "material — dímelo cuando puedas."
-                )
-                await procesar_texto(update, context, respuesta)
-                return
+            context.user_data['estado_espera'] = None
+            context.user_data['proyecto_id'] = None
+            context.user_data['cliente_nombre'] = None
+            return
+
+        costo = _es_respuesta_numerica_simple(respuesta)
+        if costo is not None:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            marcar_material_comprado(cur, proyecto_id, costo)
+            conn.commit()
+            cur.close(); conn.close()
+            await update.message.reply_text(f"✅ Material marcado con costo de ${costo:.2f}, jefe.")
+            context.user_data['estado_espera'] = None
+            context.user_data['proyecto_id'] = None
+            context.user_data['cliente_nombre'] = None
+            return
+
+        # Limpiar y procesar como nueva instrucción
         context.user_data['estado_espera'] = None
-        context.user_data['proyecto_id'] = None
-        context.user_data['cliente_nombre'] = None
+        await update.message.reply_text(
+            "🤔 No pude entender el monto. Voy a procesar tu mensaje como nueva instrucción, "
+            "pero recuerda que el costo del material sigue pendiente — puedes decírmelo después."
+        )
+        await procesar_texto(update, context, respuesta)
+
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
@@ -1748,7 +1823,6 @@ async def procesar_seleccion_fusion(update, context, respuesta):
         if len(ids) < 2:
             await update.message.reply_text("⚠️ Necesito al menos 2 proyectos para fusionar.")
             return
-        # Mostrar vista previa y pedir confirmación
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -1806,19 +1880,172 @@ async def procesar_confirmacion_fusion(update, context, respuesta):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
+async def procesar_seleccion_explicar_estado(update, context, respuesta):
+    try:
+        proyectos = context.user_data.get('proyectos_explicar', [])
+        cliente_nombre = context.user_data.get('cliente_explicar', '')
+        if not proyectos:
+            await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+        numero = _es_respuesta_numerica_simple(respuesta)
+        if numero is None or not numero.is_integer():
+            await update.message.reply_text("⚠️ Responde con el número del proyecto.")
+            return
+        idx = int(numero) - 1
+        if idx < 0 or idx >= len(proyectos):
+            await update.message.reply_text("⚠️ Número fuera de rango.")
+            return
+        pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat, pres_comp, fecha_pres, tel, dir, notas = proyectos[idx]
+        if estado == "Liquidado":
+            explicacion = (
+                f"📊 **Explicación del estado 'Liquidado' para {cliente_nombre}:**\n\n"
+                f"El proyecto '{nc}' aparece como **Liquidado** porque el **monto total (${total:.2f})** "
+                f"es igual al **monto pagado (${pagado:.2f})**.\n\n"
+                f"El sistema lo marca automáticamente así cuando el saldo es $0.00.\n"
+                f"Si aún no has entregado el trabajo, puedes cambiar el estado a:\n"
+                f"- 'Por cobrar' (si falta cobrar algo)\n"
+                f"- 'En proceso' (si está en fabricación)\n\n"
+                f"¿Quieres que lo actualice a otro estado?"
+            )
+            await update.message.reply_text(explicacion, parse_mode='Markdown')
+            context.user_data['estado_espera'] = 'esperando_cambio_estado'
+            context.user_data['cliente_cambio_estado'] = cliente_nombre
+            context.user_data['proyecto_cambio_estado'] = pid
+        else:
+            await update.message.reply_text(f"ℹ️ El proyecto '{nc}' está en estado **{estado}**. No hay nada inusual que explicar.")
+            context.user_data['estado_espera'] = None
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
+async def procesar_cambio_estado(update, context, respuesta):
+    try:
+        cliente_nombre = context.user_data.get('cliente_cambio_estado')
+        proyecto_id = context.user_data.get('proyecto_cambio_estado')
+        if not cliente_nombre or not proyecto_id:
+            await update.message.reply_text("⚠️ No tengo datos en memoria, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+        if _es_confirmacion(respuesta):
+            # Ofrecer opciones de estado
+            await update.message.reply_text(
+                "📋 ¿A qué estado quieres cambiarlo?\n\n"
+                "1. Por cobrar\n"
+                "2. En proceso\n"
+                "3. Aceptado\n"
+                "4. Pendiente de cotizar\n\n"
+                "Responde el número."
+            )
+            context.user_data['estado_espera'] = 'esperando_nuevo_estado'
+        else:
+            await update.message.reply_text("✅ Ok, lo dejo como está, jefe.")
+            context.user_data['estado_espera'] = None
+            context.user_data['cliente_cambio_estado'] = None
+            context.user_data['proyecto_cambio_estado'] = None
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
+async def procesar_nuevo_estado(update, context, respuesta):
+    try:
+        cliente_nombre = context.user_data.get('cliente_cambio_estado')
+        proyecto_id = context.user_data.get('proyecto_cambio_estado')
+        if not cliente_nombre or not proyecto_id:
+            await update.message.reply_text("⚠️ No tengo datos en memoria, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+        mapa_estados = {
+            "1": "Por cobrar",
+            "2": "En proceso",
+            "3": "Aceptado",
+            "4": "Pendiente de cotizar"
+        }
+        estado_elegido = mapa_estados.get(respuesta.strip())
+        if not estado_elegido:
+            await update.message.reply_text("⚠️ Responde 1, 2, 3 o 4.")
+            return
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE proyectos SET estado = %s WHERE id = %s", (estado_elegido, proyecto_id))
+        conn.commit()
+        cur.close(); conn.close()
+        await update.message.reply_text(f"✅ Proyecto de {cliente_nombre} actualizado a **{estado_elegido}**, jefe.")
+        context.user_data['estado_espera'] = None
+        context.user_data['cliente_cambio_estado'] = None
+        context.user_data['proyecto_cambio_estado'] = None
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
+async def procesar_confirmar_cliente_duplicado(update, context, respuesta):
+    try:
+        datos = context.user_data.get('datos_cliente_duplicado')
+        if not datos:
+            await update.message.reply_text("⚠️ No tengo datos en memoria, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+        if _es_confirmacion(respuesta):
+            # Usar cliente existente (buscar por nombre real)
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM clientes WHERE unaccent(nombre) ILIKE unaccent(%s)", (f"%{datos['cliente']}%",))
+            cliente_id = cur.fetchone()
+            if cliente_id:
+                cliente_id = cliente_id[0]
+            else:
+                # Crear nuevo si no existe (fallback)
+                cur.execute("INSERT INTO clientes (nombre, telefono, direccion, notas_adicionales) VALUES (%s, %s, %s, %s) RETURNING id",
+                            (datos['cliente'], datos.get('telefono'), datos.get('direccion'), datos.get('notas')))
+                cliente_id = cur.fetchone()[0]
+            # Ahora ejecutar la acción original con este cliente_id
+            # Reconstruir la acción
+            accion_original = datos['accion']
+            datos_originales = datos['datos']
+            if accion_original == "registrar_proyecto":
+                registrar_proyecto(cur, cliente_id, datos_originales.get('nombre_corto', 'Proyecto General'),
+                                   datos_originales.get('descripcion', ''), datos_originales.get('monto', 0),
+                                   datos_originales.get('estado', 'Pendiente de cotizar'), datos_originales.get('notas', ''))
+                conn.commit()
+                cur.close(); conn.close()
+                await update.message.reply_text("✅ Proyecto registrado con el cliente existente, jefe.")
+            elif accion_original == "marcar_presupuesto_enviado":
+                # Similar...
+                pass
+            context.user_data['estado_espera'] = None
+            context.user_data['datos_cliente_duplicado'] = None
+        else:
+            # Crear nuevo cliente
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("INSERT INTO clientes (nombre, telefono, direccion, notas_adicionales) VALUES (%s, %s, %s, %s) RETURNING id",
+                        (datos['cliente'], datos.get('telefono'), datos.get('direccion'), datos.get('notas')))
+            cliente_id = cur.fetchone()[0]
+            accion_original = datos['accion']
+            datos_originales = datos['datos']
+            if accion_original == "registrar_proyecto":
+                registrar_proyecto(cur, cliente_id, datos_originales.get('nombre_corto', 'Proyecto General'),
+                                   datos_originales.get('descripcion', ''), datos_originales.get('monto', 0),
+                                   datos_originales.get('estado', 'Pendiente de cotizar'), datos_originales.get('notas', ''))
+                conn.commit()
+                cur.close(); conn.close()
+                await update.message.reply_text("✅ Nuevo cliente y proyecto registrados, jefe.")
+            context.user_data['estado_espera'] = None
+            context.user_data['datos_cliente_duplicado'] = None
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
 def _elegir_candidato(respuesta, candidatos):
     resp_lower = respuesta.lower().strip()
-    # Intentar primero como número simple
     numero = _es_respuesta_numerica_simple(respuesta)
     if numero is not None and numero.is_integer():
         idx = int(numero) - 1
         if 0 <= idx < len(candidatos):
             return candidatos[idx][0]
-    # Luego por nombre
     for pid, nc in candidatos:
         if nc and nc.lower() in resp_lower:
             return pid
-    # Finalmente buscar número en toda la frase
     numeros = re.findall(r'\b\d+\b', respuesta)
     if len(numeros) == 1:
         idx = int(numeros[0]) - 1
@@ -1839,5 +2066,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot CORREGIDO: zona horaria CDMX, todas las mejoras de Claude implementadas.")
+    print("🤖 Bot COMPLETO: todas las correcciones de Qwen implementadas.")
     app.run_polling(drop_pending_updates=True)
