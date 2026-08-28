@@ -21,54 +21,55 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# ==================== INTELIGENCIA ARTIFICIAL ====================
+# ==================== INTELIGENCIA ARTIFICIAL (CON MEMORIA Y BORRADO) ====================
 def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_existentes=""):
     contexto_historial = ""
     if historial_mensajes:
         contexto_historial = "[Historial de los últimos mensajes]:\n"
-        for msg in historial_mensajes[-10:]:
+        for msg in historial_mensajes[-8:]:
             contexto_historial += f"- {msg}\n"
     
-    contexto_actual = f"\n[Mensaje actual del jefe]: {texto}"
+    # Detectar confirmación
+    texto_analisis = texto
+    if texto.lower() in ['si', 'sí', 'esta bien', 'ok', 'okey', 'correcto', 'bien', 'confirmo']:
+        for msg in reversed(historial_mensajes[-5:]):
+            if "Nuevo proyecto guardado" in msg or "proyecto" in msg or "¿" in msg:
+                texto_analisis = f"CONFIRMACIÓN: El jefe dice '{texto}'. Esto confirma el proyecto/pregunta anterior. NO CREES NUEVO PROYECTO, solo confirma."
+                break
+    
+    contexto_actual = f"\n[Mensaje actual del jefe]: {texto_analisis}"
     if cliente_activo:
-        contexto_actual += f"\n[Cliente activo actual (forzado por comando)]: {cliente_activo}"
+        contexto_actual += f"\n[Cliente activo actual]: {cliente_activo}"
     if proyectos_existentes:
         contexto_actual += f"\n\n[PROYECTOS EXISTENTES EN BASE DE DATOS para este cliente]:\n{proyectos_existentes}"
 
-    prompt = f"""Eres el secretario experto de un taller de aluminio. Hablas con un tono cercano y respetuoso, usando "jefe" o "patrón" de vez en cuando.
+    prompt = f"""Eres el secretario experto de un taller de aluminio. Hablas con tono cercano y respetuoso, usando "jefe" o "patrón".
 
 REGLAS ESTRICTAS:
-1. Si el cliente TIENE proyectos activos y el mensaje parece un NUEVO trabajo diferente -> usa accion: "preguntar" y pregunta si es nuevo o actualización.
-2. Si el cliente NO tiene proyectos activos -> puedes registrar directamente.
-3. Si menciona PAGO/ANTICIPO y el cliente tiene múltiples proyectos -> pregunta a cuál.
-4. Si falta algún dato crítico (monto, cliente, o trabajo) -> accion: "preguntar".
+1. **CONFIRMACIONES:** Si el jefe dice "sí", "si", "esta bien", "ok", "confirmo", y el mensaje anterior fue un registro o pregunta, NO crees nuevo proyecto. Responde confirmando.
+2. **NUEVO PROYECTO:** Solo si el mensaje contiene "registra", "anota", "nuevo" y menciona cliente y trabajo.
+3. **COMPRA DE MATERIAL:** "compré material", "ya compré" + cliente. Pregunta si hay varios proyectos. Pregunta por costo si no lo menciona.
+4. **CONSULTA MATERIAL:** "¿ya compré?", "¿material comprado?" + cliente.
+5. **CONSULTAS GENERALES:** "qué clientes tengo", "cuántos clientes", "resumen" -> consultar "todos".
+6. **PAGOS:** "pago", "anticipo", "abono" -> registrar_pago.
+7. **CANCELAR:** "cancela", "cancelar", "ya no quiero", "descarta" -> cancelar_proyecto (cambia estado a Cancelado).
+8. **BORRAR DEFINITIVAMENTE:** "borra definitivamente", "elimina del sistema", "borra para siempre", "borra este proyecto" -> borrar_proyecto_definitivo (DELETE físico).
+9. Si hay ambigüedad o falta info, usa "preguntar".
 
-5. COMPRA DE MATERIAL: Si dice "compré material", "compre material", "ya compré", "material comprado", "compré los materiales" y MENCIONA un cliente -> accion: "registrar_compra_material".
-   - Ej: "ya compré material para Pedro" -> registra compra de material para Pedro.
-   - Ej: "compre material para el proyecto de María" -> registra compra de material para María.
-   - SIEMPRE extrae: cliente_nombre.
-   - Si el cliente tiene varios proyectos, la IA debe devolver "accion": "preguntar" y en "pregunta" listar los proyectos para que el jefe elija.
-   - Si menciona un costo total (ej: "gasté 4500"), extrae el monto.
-
-6. CONSULTA DE MATERIAL: Si pregunta "¿ya compré?", "¿compraste el material?", "¿se compró el material?", "¿material comprado?" y menciona un cliente -> accion: "consultar_material".
-   - Ej: "¿Ya se compró el material para Pedro?" -> consultar_material con cliente "Pedro".
-
-7. Si responde a una pregunta previa (ej. "Sí", "No", "el 1", "todos") -> analiza el historial para saber a qué se refiere.
-
-Responde SOLO con un objeto JSON válido con esta estructura:
+Responde SOLO con JSON:
 {{
-  "accion": "registrar_proyecto" | "registrar_pago" | "actualizar_proyecto" | "cancelar_proyecto" | "consultar" | "consultar_historial" | "consultar_material" | "registrar_compra_material" | "preguntar",
-  "cliente": "nombre completo (si aplica)",
-  "nombre_corto": "Nombre breve del trabajo (para proyectos)",
+  "accion": "registrar_proyecto" | "registrar_pago" | "actualizar_proyecto" | "cancelar_proyecto" | "borrar_proyecto_definitivo" | "consultar" | "consultar_historial" | "consultar_material" | "registrar_compra_material" | "preguntar",
+  "cliente": "nombre",
+  "nombre_corto": "nombre breve",
   "monto": numero o 0,
-  "descripcion": "detalles completos",
-  "notas": "notas adicionales",
+  "descripcion": "detalles",
+  "notas": "",
   "telefono": "",
   "direccion": "",
-  "estado": "Pendiente de cotizar" | "Aceptado" | "Presupuesto enviado" | "En proceso" | "Por cobrar" | "Liquidado" | "Cancelado",
-  "tipo_consulta": "deudores" | "pendientes" | "todos" | "liquidados",
-  "pregunta": "texto de la pregunta (si accion es 'preguntar')",
-  "resumen": "Frase corta de lo que harás"
+  "estado": "Pendiente de cotizar",
+  "tipo_consulta": "todos",
+  "pregunta": "texto",
+  "resumen": "frase corta"
 }}
 
 {contexto_historial}
@@ -177,6 +178,10 @@ def cancelar_proyecto_todos(cur, cliente_nombre):
     """, (f"%{cliente_nombre}%",))
     return cur.rowcount > 0
 
+def borrar_proyecto_definitivo(cur, proyecto_id):
+    cur.execute("DELETE FROM proyectos WHERE id = %s", (proyecto_id,))
+    return cur.rowcount > 0
+
 def registrar_pago(cur, cliente_nombre, monto_pago):
     cur.execute("""SELECT p.id, p.monto_total, p.monto_pagado, p.estado, p.nombre_corto
                    FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
@@ -197,7 +202,6 @@ def registrar_pago(cur, cliente_nombre, monto_pago):
                 (nuevo_pagado, nuevo_estado, proyecto_id))
     return proyecto_id, f"{nombre_corto}: Anticipo/Pago ${monto_pago:.2f}. Saldo: ${saldo:.2f}. Estado: {nuevo_estado}"
 
-# ========== NUEVAS FUNCIONES PARA MATERIAL ==========
 def marcar_material_comprado(cur, proyecto_id, costo=None):
     cur.execute("""
         UPDATE proyectos 
@@ -218,7 +222,6 @@ def consultar_material_cliente(cur, cliente_nombre):
     """, (f"%{cliente_nombre}%",))
     return cur.fetchall()
 
-# ========== CONSULTAS ==========
 def consultar_proyectos(cur, tipo):
     if tipo == "deudores":
         cur.execute("""
@@ -260,8 +263,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/estadisticas - Resumen de proyectos\n"
         "/historial [nombre] - Historial de un cliente\n"
         "/resumen - Ver clientes activos\n"
-        "/material [nombre] - Consultar material comprado de un cliente\n"
-        "/gastos - Ver últimos 10 gastos generales (si usas la tabla separada)"
+        "/material [nombre] - Consultar material comprado\n"
+        "Puede decir 'borra definitivamente [cliente]' para eliminar un proyecto."
     )
 
 async def comando_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -348,7 +351,6 @@ async def comando_resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
 
-# ========== COMANDO: CONSULTAR MATERIAL ==========
 async def comando_material(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("⚠️ Usa: /material Nombre, jefe. Ej: /material Pedro")
@@ -374,25 +376,167 @@ async def comando_material(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
 
+# ==================== MANEJO DE ESTADOS DE ESPERA ====================
+async def procesar_seleccion_material(update, context, respuesta):
+    try:
+        proyectos = context.user_data.get('proyectos_seleccion', [])
+        cliente_nombre = context.user_data.get('cliente_nombre', '')
+        costo_sugerido = context.user_data.get('costo_sugerido', 0)
+        
+        if not proyectos:
+            await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe.")
+            context.user_data['estado_espera'] = None
+            return
+        
+        seleccion = None
+        resp_lower = respuesta.lower().strip()
+        if resp_lower in ['todos', 'todo', 'ambos', 'todas']:
+            seleccion = 'todos'
+        else:
+            for i, (pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat) in enumerate(proyectos, 1):
+                if resp_lower == str(i) or nc.lower() in resp_lower or desc.lower()[:20] in resp_lower:
+                    seleccion = i
+                    break
+        
+        if seleccion is None:
+            await update.message.reply_text("⚠️ No entendí, responde con el número, el nombre del proyecto o 'todos'.")
+            return
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        if seleccion == 'todos':
+            for pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat in proyectos:
+                marcar_material_comprado(cur, pid, costo_sugerido if costo_sugerido > 0 else None)
+            conn.commit()
+            cur.close(); conn.close()
+            await update.message.reply_text(f"✅ Material marcado como comprado para **todos** los proyectos de {cliente_nombre}, jefe.")
+        else:
+            idx = seleccion - 1
+            pid = proyectos[idx][0]
+            nc = proyectos[idx][1]
+            if costo_sugerido == 0:
+                context.user_data['estado_espera'] = 'esperando_costo_material'
+                context.user_data['proyecto_id'] = pid
+                await update.message.reply_text(f"🤔 ¿Quieres registrar el costo del material para '{nc}', jefe? Ej: 'si, 4500' o 'no'")
+                return
+            marcar_material_comprado(cur, pid, costo_sugerido)
+            conn.commit()
+            cur.close(); conn.close()
+            await update.message.reply_text(f"✅ Material marcado como comprado para *{cliente_nombre} - {nc}*, jefe.\n💰 Costo: ${costo_sugerido:.2f}")
+        
+        context.user_data['estado_espera'] = None
+        context.user_data['proyectos_seleccion'] = None
+        context.user_data['cliente_nombre'] = None
+        context.user_data['costo_sugerido'] = None
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error en selección: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
+async def procesar_costo_material(update, context, respuesta):
+    try:
+        proyecto_id = context.user_data.get('proyecto_id')
+        cliente_nombre = context.user_data.get('cliente_nombre', '')
+        if not proyecto_id:
+            await update.message.reply_text("⚠️ No tengo proyecto en memoria.")
+            context.user_data['estado_espera'] = None
+            return
+        
+        resp_lower = respuesta.lower().strip()
+        if resp_lower.startswith('si') or resp_lower.startswith('sí'):
+            import re
+            numeros = re.findall(r'\d+', respuesta)
+            if numeros:
+                costo = float(numeros[0])
+                conn = get_db_connection()
+                cur = conn.cursor()
+                marcar_material_comprado(cur, proyecto_id, costo)
+                conn.commit()
+                cur.close(); conn.close()
+                await update.message.reply_text(f"✅ Material marcado con costo de ${costo:.2f}, jefe.")
+            else:
+                await update.message.reply_text("🤔 ¿De cuánto fue el costo total? (ej: 4500)")
+                return
+        elif resp_lower.startswith('no'):
+            conn = get_db_connection()
+            cur = conn.cursor()
+            marcar_material_comprado(cur, proyecto_id, None)
+            conn.commit()
+            cur.close(); conn.close()
+            await update.message.reply_text("✅ Material marcado como comprado sin costo, jefe.")
+        else:
+            await update.message.reply_text("🤔 No entendí. Responde 'si, 4500' o 'no'.")
+            return
+        
+        context.user_data['estado_espera'] = None
+        context.user_data['proyecto_id'] = None
+        context.user_data['cliente_nombre'] = None
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
+async def procesar_seleccion_borrado(update, context, respuesta):
+    try:
+        proyectos = context.user_data.get('proyectos_borrar', [])
+        if not proyectos:
+            await update.message.reply_text("⚠️ No tengo proyectos en memoria.")
+            context.user_data['estado_espera'] = None
+            return
+        resp_lower = respuesta.lower().strip()
+        seleccion = None
+        for i, (pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat) in enumerate(proyectos, 1):
+            if resp_lower == str(i) or nc.lower() in resp_lower:
+                seleccion = i
+                break
+        if seleccion is None:
+            await update.message.reply_text("⚠️ Responde el número del proyecto.")
+            return
+        idx = seleccion - 1
+        pid = proyectos[idx][0]
+        nc = proyectos[idx][1]
+        cliente_nombre = context.user_data.get('cliente_borrar', '')
+        # Pedir confirmación final
+        context.user_data['estado_espera'] = 'confirmar_borrado'
+        context.user_data['proyecto_borrar'] = pid
+        await update.message.reply_text(f"⚠️ **¿Seguro que quieres BORRAR DEFINITIVAMENTE '{nc}' de {cliente_nombre}?**\nEsto no se deshace. Responde 'SÍ' para confirmar.", parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
+async def procesar_confirmacion_borrado(update, context, respuesta):
+    try:
+        proyecto_id = context.user_data.get('proyecto_borrar')
+        cliente_nombre = context.user_data.get('cliente_borrar', '')
+        if not proyecto_id:
+            await update.message.reply_text("⚠️ No tengo proyecto en memoria.")
+            context.user_data['estado_espera'] = None
+            return
+        if respuesta.strip().upper() == 'SÍ':
+            conn = get_db_connection()
+            cur = conn.cursor()
+            borrar_proyecto_definitivo(cur, proyecto_id)
+            conn.commit()
+            cur.close(); conn.close()
+            await update.message.reply_text(f"🗑️ Proyecto **borrado definitivamente** de {cliente_nombre}, jefe.", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("✅ Borrado cancelado, jefe.")
+        context.user_data['estado_espera'] = None
+        context.user_data['proyecto_borrar'] = None
+        context.user_data['cliente_borrar'] = None
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        context.user_data['estado_espera'] = None
+
 # ==================== PROCESADOR PRINCIPAL ====================
 async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, texto_original: str):
     try:
         historial = context.user_data.get('historial', [])
         cliente_activo = context.user_data.get('cliente_activo', '')
         
-        # Verificar si estamos en un estado de espera (selección de proyecto para material)
-        estado_espera = context.user_data.get('estado_espera')
-        if estado_espera == 'seleccion_material':
-            # El usuario está respondiendo a la pregunta de selección de proyecto
-            # Procesar la respuesta
-            await procesar_seleccion_material(update, context, texto_original)
-            return
-
         historial.append(f"👤 Jefe: {texto_original}")
         if len(historial) > 15:
             historial = historial[-15:]
+        context.user_data['historial'] = historial
         
-        # Primera llamada a la IA para interpretar el mensaje
         datos = analizar_con_ia(texto_original, historial, cliente_activo, "")
         accion = datos.get("accion", "preguntar")
         
@@ -411,9 +555,8 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         if accion == "consultar_material":
             nombre_cliente = datos.get("cliente", cliente_activo if cliente_activo else "")
             if not nombre_cliente or nombre_cliente == "Desconocido":
-                await update.message.reply_text("⚠️ ¿De qué cliente quieres saber el estado del material, jefe?")
+                await update.message.reply_text("⚠️ ¿De qué cliente quieres saber el material, jefe?")
                 return
-            # Redirigir al comando /material
             context.args = [nombre_cliente]
             await comando_material(update, context)
             return
@@ -425,10 +568,10 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
                 context.args = [nombre_buscar]
                 await comando_historial(update, context)
             else:
-                await update.message.reply_text("⚠️ ¿De qué cliente quieres ver el historial, jefe?")
+                await update.message.reply_text("⚠️ ¿De qué cliente quieres el historial, jefe?")
             return
 
-        # ===== CONSULTAR (resumen, deudores, etc) =====
+        # ===== CONSULTAR (resumen, clientes) =====
         if accion == "consultar":
             tipo = datos.get("tipo_consulta", "todos")
             conn = get_db_connection()
@@ -460,63 +603,7 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
             await update.message.reply_text(msg, parse_mode='Markdown')
             return
 
-        # ===== REGISTRAR COMPRA DE MATERIAL =====
-        if accion == "registrar_compra_material":
-            cliente_nombre = datos.get("cliente", cliente_activo if cliente_activo else "")
-            if not cliente_nombre or cliente_nombre == "Desconocido":
-                await update.message.reply_text("⚠️ ¿Para qué cliente compraste el material, jefe?")
-                return
-            
-            # Obtener proyectos activos de ese cliente
-            conn = get_db_connection()
-            cur = conn.cursor()
-            proyectos = obtener_proyectos_activos(cur, cliente_nombre)
-            cur.close(); conn.close()
-            
-            if not proyectos:
-                await update.message.reply_text(f"⚠️ No tengo proyectos activos para {cliente_nombre}, jefe.")
-                return
-            
-            # Si solo hay un proyecto, marcar directamente
-            if len(proyectos) == 1:
-                proyecto_id, nombre_corto, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat = proyectos[0]
-                # Preguntar si quiere registrar costo
-                costo = datos.get("monto", 0)
-                if costo == 0:
-                    # Preguntar si quiere registrar costo
-                    context.user_data['estado_espera'] = 'esperando_costo_material'
-                    context.user_data['proyecto_id'] = proyecto_id
-                    context.user_data['cliente_nombre'] = cliente_nombre
-                    await update.message.reply_text(f"🤔 ¿Quieres registrar el costo total del material para '{nombre_corto}', jefe? Ej: 'si, 4500' o 'no'")
-                    return
-                else:
-                    conn = get_db_connection()
-                    cur = conn.cursor()
-                    marcar_material_comprado(cur, proyecto_id, costo)
-                    conn.commit()
-                    cur.close(); conn.close()
-                    fecha_str = "ahora"
-                    await update.message.reply_text(f"✅ Material marcado como comprado para *{cliente_nombre} - {nombre_corto}*, jefe.\n📅 Fecha: {fecha_str}\n💰 Costo: ${costo:.2f}", parse_mode='Markdown')
-                    return
-            else:
-                # Múltiples proyectos: listarlos y preguntar
-                msg = f"👤 **{cliente_nombre}** tiene {len(proyectos)} proyectos activos:\n\n"
-                opciones = []
-                for i, (pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat) in enumerate(proyectos, 1):
-                    msg += f"{i}. *{nc}* - {desc[:50]}... (${total})\n"
-                    opciones.append((pid, nc))
-                msg += "\n¿Para cuál proyecto o para todos? (responde el número, el nombre o 'todos')"
-                
-                # Guardar estado para la respuesta
-                context.user_data['estado_espera'] = 'seleccion_material'
-                context.user_data['proyectos_seleccion'] = proyectos
-                context.user_data['cliente_nombre'] = cliente_nombre
-                context.user_data['costo_sugerido'] = datos.get("monto", 0)
-                
-                await update.message.reply_text(msg, parse_mode='Markdown')
-                return
-
-        # ===== ACCIONES DE ESCRITURA (proyectos, pagos, etc.) =====
+        # ===== ACCIONES DE ESCRITURA =====
         cliente_nombre = datos.get("cliente", cliente_activo if cliente_activo else "Desconocido")
         nombre_corto = datos.get("nombre_corto", "Proyecto General")
         monto = float(datos.get("monto", 0))
@@ -533,12 +620,15 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         conn = get_db_connection()
         cur = conn.cursor()
 
+        # ===== REGISTRAR PROYECTO =====
         if accion == "registrar_proyecto":
+            # Verificar si ya existe un proyecto similar para evitar duplicados por error
             buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
             cliente_id = buscar_o_crear_cliente(cur, cliente_nombre)
             registrar_proyecto(cur, cliente_id, nombre_corto, descripcion, monto, estado, notas)
             respuesta = f"✅ **Nuevo proyecto guardado, jefe:**\n{resumen_ia}\n Total: ${monto:.2f}"
 
+        # ===== ACTUALIZAR PROYECTO =====
         elif accion == "actualizar_proyecto":
             buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
             actualizado = actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, estado, notas)
@@ -547,6 +637,7 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
             else:
                 respuesta = f"⚠️ No encontré proyectos activos para {cliente_nombre}, jefe."
 
+        # ===== CANCELAR PROYECTO =====
         elif accion == "cancelar_proyecto":
             actualizado = cancelar_proyecto_todos(cur, cliente_nombre)
             if actualizado:
@@ -554,17 +645,81 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
             else:
                 respuesta = f"⚠️ No encontré proyectos activos para {cliente_nombre}."
 
+        # ===== BORRAR DEFINITIVAMENTE =====
+        elif accion == "borrar_proyecto_definitivo":
+            # Obtener proyectos del cliente
+            proyectos = obtener_proyectos_activos(cur, cliente_nombre)
+            cur.close(); conn.close()
+            if not proyectos:
+                await update.message.reply_text(f"⚠️ No encontré proyectos activos para {cliente_nombre}, jefe.")
+                return
+            if len(proyectos) == 1:
+                pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat = proyectos[0]
+                context.user_data['estado_espera'] = 'confirmar_borrado'
+                context.user_data['proyecto_borrar'] = pid
+                context.user_data['cliente_borrar'] = cliente_nombre
+                await update.message.reply_text(f"⚠️ **¿Seguro que quieres BORRAR DEFINITIVAMENTE '{nc}' de {cliente_nombre}?**\nEsto no se deshace. Responde 'SÍ' para confirmar.", parse_mode='Markdown')
+                return
+            else:
+                msg = f"👤 **{cliente_nombre}** tiene varios proyectos. ¿Cuál quieres borrar definitivamente?\n\n"
+                for i, (pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat) in enumerate(proyectos, 1):
+                    msg += f"{i}. *{nc}* - {desc[:40]}...\n"
+                msg += "\nResponde el número."
+                context.user_data['estado_espera'] = 'seleccion_borrado'
+                context.user_data['proyectos_borrar'] = proyectos
+                context.user_data['cliente_borrar'] = cliente_nombre
+                await update.message.reply_text(msg, parse_mode='Markdown')
+                return
+
+        # ===== REGISTRAR PAGO =====
         elif accion == "registrar_pago":
             buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion)
             _, msg_pago = registrar_pago(cur, cliente_nombre, monto)
             respuesta = f"💰 **Pago registrado, patrón:**\n{resumen_ia}\n{msg_pago}"
+
+        # ===== COMPRA DE MATERIAL =====
+        elif accion == "registrar_compra_material":
+            if not cliente_nombre or cliente_nombre == "Desconocido":
+                await update.message.reply_text("⚠️ ¿Para qué cliente compraste el material, jefe?")
+                return
+            # Obtener proyectos del cliente
+            proyectos = obtener_proyectos_activos(cur, cliente_nombre)
+            cur.close(); conn.close()
+            if not proyectos:
+                await update.message.reply_text(f"⚠️ No tengo proyectos activos para {cliente_nombre}, jefe.")
+                return
+            if len(proyectos) == 1:
+                pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat = proyectos[0]
+                costo = datos.get("monto", 0)
+                if costo == 0:
+                    context.user_data['estado_espera'] = 'esperando_costo_material'
+                    context.user_data['proyecto_id'] = pid
+                    context.user_data['cliente_nombre'] = cliente_nombre
+                    await update.message.reply_text(f"🤔 ¿Quieres registrar el costo del material para '{nc}', jefe? Ej: 'si, 4500' o 'no'")
+                    return
+                else:
+                    marcar_material_comprado(cur, pid, costo)
+                    conn.commit()
+                    cur.close(); conn.close()
+                    await update.message.reply_text(f"✅ Material marcado como comprado para *{cliente_nombre} - {nc}*, jefe.\n💰 Costo: ${costo:.2f}")
+                    return
+            else:
+                msg = f"👤 **{cliente_nombre}** tiene {len(proyectos)} proyectos:\n\n"
+                for i, (pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat) in enumerate(proyectos, 1):
+                    msg += f"{i}. *{nc}* - {desc[:40]}...\n"
+                msg += "\n¿Para cuál proyecto o 'todos'?"
+                context.user_data['estado_espera'] = 'seleccion_material'
+                context.user_data['proyectos_seleccion'] = proyectos
+                context.user_data['cliente_nombre'] = cliente_nombre
+                context.user_data['costo_sugerido'] = datos.get("monto", 0)
+                await update.message.reply_text(msg, parse_mode='Markdown')
+                return
 
         else:
             respuesta = f"⚠️ No sé cómo procesar '{accion}', jefe. ¿Puedes repetir?"
 
         conn.commit()
         cur.close(); conn.close()
-        
         respuesta += "\n\n_(Si algo no está bien, dímelo y lo corregimos)_"
         await update.message.reply_text(respuesta, parse_mode='Markdown')
 
@@ -572,146 +727,21 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         logging.error(f"🔴 Error: {e}")
         await update.message.reply_text(f"❌ Error interno: {str(e)[:150]}. Lo siento, jefe.")
 
-# ==================== MANEJO DE SELECCIÓN DE MATERIAL ====================
-async def procesar_seleccion_material(update: Update, context: ContextTypes.DEFAULT_TYPE, respuesta_texto: str):
-    try:
-        proyectos = context.user_data.get('proyectos_seleccion', [])
-        cliente_nombre = context.user_data.get('cliente_nombre', '')
-        costo_sugerido = context.user_data.get('costo_sugerido', 0)
-        
-        if not proyectos:
-            await update.message.reply_text("⚠️ No tengo proyectos en memoria, jefe. ¿Puedes repetir?")
-            context.user_data['estado_espera'] = None
-            return
-        
-        # Determinar selección
-        seleccion = None
-        respuesta_lower = respuesta_texto.lower().strip()
-        
-        # Verificar si es "todos"
-        if respuesta_lower in ['todos', 'todo', 'ambos', 'todas', 'todos los proyectos']:
-            seleccion = 'todos'
-        else:
-            # Intentar interpretar número o nombre parcial
-            for i, (pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat) in enumerate(proyectos, 1):
-                if respuesta_lower == str(i) or respuesta_lower in nc.lower() or respuesta_lower in desc.lower()[:20].lower():
-                    seleccion = i
-                    break
-        
-        if seleccion is None:
-            await update.message.reply_text("⚠️ No entendí cuál proyecto, jefe. Responde con el número, el nombre del proyecto o 'todos'.")
-            return
-        
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        if seleccion == 'todos':
-            # Marcar todos los proyectos del cliente
-            for pid, nc, desc, total, pagado, estado, mat_comp, fecha_mat, costo_mat in proyectos:
-                marcar_material_comprado(cur, pid, costo_sugerido if costo_sugerido > 0 else None)
-            conn.commit()
-            cur.close(); conn.close()
-            await update.message.reply_text(f"✅ Material marcado como comprado para **todos** los proyectos de {cliente_nombre}, jefe.", parse_mode='Markdown')
-        else:
-            # Seleccionar el proyecto específico
-            idx = seleccion - 1
-            proyecto = proyectos[idx]
-            pid = proyecto[0]
-            nc = proyecto[1]
-            
-            # Si no se registró costo, preguntar
-            if costo_sugerido == 0:
-                context.user_data['estado_espera'] = 'esperando_costo_material'
-                context.user_data['proyecto_id'] = pid
-                context.user_data['cliente_nombre'] = cliente_nombre
-                await update.message.reply_text(f"🤔 ¿Quieres registrar el costo total del material para '{nc}', jefe? Ej: 'si, 4500' o 'no'")
-                return
-            
-            marcar_material_comprado(cur, pid, costo_sugerido)
-            conn.commit()
-            cur.close(); conn.close()
-            await update.message.reply_text(f"✅ Material marcado como comprado para *{cliente_nombre} - {nc}*, jefe.\n💰 Costo: ${costo_sugerido:.2f}", parse_mode='Markdown')
-        
-        # Limpiar estado
-        context.user_data['estado_espera'] = None
-        context.user_data['proyectos_seleccion'] = None
-        context.user_data['cliente_nombre'] = None
-        context.user_data['costo_sugerido'] = None
-        
-    except Exception as e:
-        logging.error(f"🔴 Error en selección: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:150]}. Lo siento, jefe.")
-        context.user_data['estado_espera'] = None
-
-# ==================== MANEJO DE COSTO DE MATERIAL ====================
-async def procesar_costo_material(update: Update, context: ContextTypes.DEFAULT_TYPE, respuesta_texto: str):
-    try:
-        proyecto_id = context.user_data.get('proyecto_id')
-        cliente_nombre = context.user_data.get('cliente_nombre', '')
-        
-        if not proyecto_id:
-            await update.message.reply_text("⚠️ No tengo proyecto en memoria, jefe. ¿Puedes repetir?")
-            context.user_data['estado_espera'] = None
-            return
-        
-        respuesta_lower = respuesta_texto.lower().strip()
-        
-        if respuesta_lower.startswith('si') or respuesta_lower.startswith('sí'):
-            # Intentar extraer el monto
-            import re
-            numeros = re.findall(r'\d+', respuesta_texto)
-            if numeros:
-                costo = float(numeros[0])
-                conn = get_db_connection()
-                cur = conn.cursor()
-                marcar_material_comprado(cur, proyecto_id, costo)
-                conn.commit()
-                cur.close(); conn.close()
-                await update.message.reply_text(f"✅ Material marcado como comprado con costo de ${costo:.2f}, jefe.", parse_mode='Markdown')
-            else:
-                # Si dijo "si" pero no dio monto, preguntar el monto
-                await update.message.reply_text("🤔 ¿De cuánto fue el costo total del material, jefe? (ej: 4500)")
-                return
-        elif respuesta_lower.startswith('no'):
-            # Registrar sin costo
-            conn = get_db_connection()
-            cur = conn.cursor()
-            marcar_material_comprado(cur, proyecto_id, None)
-            conn.commit()
-            cur.close(); conn.close()
-            await update.message.reply_text(f"✅ Material marcado como comprado sin costo registrado, jefe.", parse_mode='Markdown')
-        else:
-            # No entendió, repetir
-            await update.message.reply_text("🤔 No entendí. Responde 'si, 4500' para registrar el costo o 'no' para saltarlo.")
-            return
-        
-        # Limpiar estado
-        context.user_data['estado_espera'] = None
-        context.user_data['proyecto_id'] = None
-        context.user_data['cliente_nombre'] = None
-        
-    except Exception as e:
-        logging.error(f"🔴 Error en costo: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:150]}. Lo siento, jefe.")
-        context.user_data['estado_espera'] = None
-
 # ==================== MANEJO DE MENSAJES ====================
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
         texto = update.message.text
-        
-        # Verificar estados de espera
         estado = context.user_data.get('estado_espera')
         if estado == 'seleccion_material':
             await procesar_seleccion_material(update, context, texto)
-            return
         elif estado == 'esperando_costo_material':
             await procesar_costo_material(update, context, texto)
-            return
-        
-        # Procesar normalmente
-        await procesar_texto(update, context, texto)
-        
+        elif estado == 'seleccion_borrado':
+            await procesar_seleccion_borrado(update, context, texto)
+        elif estado == 'confirmar_borrado':
+            await procesar_confirmacion_borrado(update, context, texto)
+        else:
+            await procesar_texto(update, context, texto)
     elif update.message.voice:
         try:
             await update.message.reply_text("🎙️ Escuchando, jefe...")
@@ -721,7 +751,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             texto = transcribir_audio(ruta)
             os.remove(ruta)
             await update.message.reply_text(f"📝 *\"{texto}\"*", parse_mode='Markdown')
-            await manejar_mensaje(update, context)  # Reprocesar el texto transcrito
+            await manejar_mensaje(update, context)  # Reprocesar
         except Exception as e:
             await update.message.reply_text(f"❌ Error de audio: {str(e)[:100]}. Disculpe, jefe.")
 
@@ -736,5 +766,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("material", comando_material))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot con MATERIAL COMPRADO (SÍ/NO + fecha + costo opcional) iniciado...")
+    print("🤖 Bot con MEMORIA, MATERIAL COMPRADO y BORRADO DEFINITIVO iniciado...")
     app.run_polling(drop_pending_updates=True)
