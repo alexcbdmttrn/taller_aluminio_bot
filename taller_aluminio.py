@@ -3,6 +3,7 @@ import json
 import re
 import logging
 import psycopg2
+from decimal import Decimal
 from openai import OpenAI
 from groq import Groq
 from telegram import Update
@@ -22,9 +23,9 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# ==================== INTELIGENCIA ARTIFICIAL ====================
+# ==================== INTELIGENCIA ARTIFICIAL (PROMPT MEJORADO) ====================
 def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_existentes=""):
-    # Obtener lista de clientes reales para que la IA elija el nombre correcto
+    # Obtener lista de clientes reales
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT nombre FROM clientes ORDER BY nombre")
@@ -56,35 +57,30 @@ def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_exis
 CLIENTES REGISTRADOS (usa estos nombres EXACTOS cuando reconozcas a un cliente):
 {', '.join(clientes_reales) if clientes_reales else 'Aún no hay clientes registrados.'}
 
-REGLAS ESTRICTAS:
-1. **MÚLTIPLES TAREAS**: Puedes recibir varias instrucciones en un mensaje. Extrae TODOS los datos.
-2. **FALTAS DE ORTOGRAFÍA Y TILDES**: El jefe puede escribir mal los nombres. Usa la lista de CLIENTES REGISTRADOS para elegir el nombre correcto. Si hay ambigüedad, accion "preguntar".
-3. **CONFIRMACIONES**: "si", "sí", "esta bien", "ok" → NO crees nuevo proyecto, solo confirma lo anterior.
-4. **NUEVO PROYECTO**: "registra", "anota", "nuevo" + cliente + trabajo.
-5. **PRESUPUESTO**: Si menciona presupuesto + monto → actualiza. Si dice "ya mandé presupuesto" → accion "marcar_presupuesto_enviado".
-6. **MATERIAL**: "compré material", "ya compré" + cliente. Si menciona monto, lo guarda.
-7. **CONSULTA PRESUPUESTO**: "¿ya se entregó presupuesto a [cliente]?" → accion "consultar_presupuesto".
-8. **CONSULTA MATERIAL**: "¿ya compré material?", "¿material comprado?" + cliente → accion "consultar_material".
-9. **CONSULTAS GENERALES**: "qué clientes tengo", "muestrame los clientes", "clientes activos" → accion "consultar" con tipo_consulta "activos".
-   "muestrame clientes cancelados", "proyectos cancelados", "cancelados" → accion "consultar" con tipo_consulta "cancelados".
-   "liquidados" → tipo_consulta "liquidados".
-10. **CANCELAR**: "cancela", "cancelar" + nombre específico. NUNCA canceles todos sin preguntar.
-11. **BORRAR**: "borra", "elimina", "borrar", "quiero eliminar clientes" + [cliente] → accion "iniciar_borrado" con tipo_borrado: "activos" y cliente: "[nombre]". Si no menciona cliente, inicia borrado general (pregunta tipo).
-12. **GASTOS**: "gasté", "gaste" sin cliente → accion "registrar_gasto". "gastos" → accion "consultar_gastos". "borrar gastos" → "iniciar_borrado" tipo "gastos".
+REGLAS ESTRICTAS (LEE CON ATENCIÓN):
+1. **PREGUNTA SIEMPRE DATOS FALTANTES**: Si el jefe registra un cliente/proyecto y falta información importante (dirección, teléfono, monto del presupuesto, etc.), usa accion "preguntar" y pregunta específicamente qué falta. No guardes un proyecto sin monto sin preguntar.
+2. **CONFIRMACIONES**: "si", "sí", "esta bien", "ok" → NO crees nuevo proyecto, solo confirma lo anterior.
+3. **NUEVO PROYECTO**: "registra", "anota", "nuevo" + cliente + trabajo. Si falta monto, pregunta "¿Cuál es el presupuesto total?".
+4. **PRESUPUESTO ENVIADO**: Si dice "ya mandé presupuesto" o "entregué presupuesto", accion "marcar_presupuesto_enviado". Esto también debe actualizar el estado a "Presupuesto enviado".
+5. **PAGO/ANTICIPO**: Si menciona pago o anticipo, accion "registrar_pago". Siempre pregunta el monto si no lo da.
+6. **MATERIAL**: "compré material" + cliente → accion "registrar_compra_material". Si no da el costo, pregunta.
+7. **CONSULTAS**: "qué clientes tengo" → "consultar" con tipo_consulta "activos". "clientes cancelados" → "consultar" con tipo_consulta "cancelados". "liquidados" → similar.
+8. **BORRAR**: "borra", "elimina", "quiero eliminar clientes" → accion "iniciar_borrado". Si no especifica tipo, pregunta si activos, cancelados, liquidados o gastos.
+9. **GASTOS**: "gasté", "gaste" sin cliente → accion "registrar_gasto". "gastos" → "consultar_gastos". "borrar gastos" → "iniciar_borrado" tipo "gastos".
 
 Responde SOLO con JSON:
 {{
   "accion": "registrar_proyecto" | "registrar_pago" | "actualizar_proyecto" | "marcar_presupuesto_enviado" | "cancelar_proyecto" | "iniciar_borrado" | "consultar" | "consultar_historial" | "consultar_material" | "consultar_presupuesto" | "registrar_compra_material" | "registrar_gasto" | "consultar_gastos" | "preguntar",
-  "cliente": "nombre (de la lista de clientes registrados si es posible)",
-  "nombre_corto": "nombre breve del proyecto",
+  "cliente": "nombre",
+  "nombre_corto": "nombre breve del proyecto (máximo 30 caracteres)",
   "monto": numero o 0,
   "descripcion": "detalles",
   "notas": "",
   "estado": "Pendiente de cotizar" | "Presupuesto enviado" | "Aceptado" | "En proceso" | "Por cobrar" | "Liquidado" | "Cancelado",
   "tipo_borrado": "activos" | "cancelados" | "liquidados" | "gastos",
   "tipo_consulta": "activos" | "cancelados" | "liquidados" | "deudores" | "pendientes" | "todos",
-  "pregunta": "texto de la pregunta",
-  "resumen": "frase corta"
+  "pregunta": "texto de la pregunta (solo si accion es preguntar)",
+  "resumen": "frase corta de lo que harás"
 }}
 
 {contexto_historial}
@@ -189,9 +185,15 @@ def registrar_gasto(cur, descripcion, monto):
     cur.execute("INSERT INTO gastos (descripcion, monto) VALUES (%s, %s) RETURNING id", (descripcion, monto))
     return cur.fetchone()[0]
 
-# ===== FUNCIONES DE BORRADO CORREGIDAS =====
+def limpiar_clientes_huérfanos(cur):
+    cur.execute("""
+        DELETE FROM clientes 
+        WHERE id NOT IN (SELECT DISTINCT cliente_id FROM proyectos WHERE cliente_id IS NOT NULL)
+    """)
+    return cur.rowcount
+
+# ===== FUNCIÓN DE BORRADO CORREGIDA =====
 def borrar_proyectos_por_ids(cur, ids):
-    """Asegura que ids sea una lista de enteros válidos antes de eliminar."""
     ids_int = []
     for id_item in ids:
         try:
@@ -213,15 +215,6 @@ def borrar_gastos_por_ids(cur, ids):
     if not ids_int:
         return 0
     cur.execute("DELETE FROM gastos WHERE id = ANY(%s)", (ids_int,))
-    return cur.rowcount
-
-# ===== NUEVA FUNCIÓN: limpiar clientes huérfanos =====
-def limpiar_clientes_huérfanos(cur):
-    """Elimina clientes que no tienen ningún proyecto asociado."""
-    cur.execute("""
-        DELETE FROM clientes 
-        WHERE id NOT IN (SELECT DISTINCT cliente_id FROM proyectos WHERE cliente_id IS NOT NULL)
-    """)
     return cur.rowcount
 
 # ==================== FUNCIONES DE PROYECTOS ====================
@@ -312,7 +305,9 @@ def marcar_presupuesto_enviado(cur, cliente_nombre, nombre_corto):
         return False, candidatos
     cur.execute("""
         UPDATE proyectos 
-        SET presupuesto_enviado = TRUE, fecha_presupuesto = CURRENT_TIMESTAMP
+        SET presupuesto_enviado = TRUE, 
+            fecha_presupuesto = CURRENT_TIMESTAMP,
+            estado = 'Presupuesto enviado'
         WHERE id = %s
     """, (proyecto_id,))
     return True, []
@@ -332,6 +327,8 @@ def cancelar_proyecto_especifico(cur, cliente_nombre, nombre_corto):
     return False
 
 def registrar_pago(cur, cliente_nombre, monto_pago):
+    # Convertir monto_pago a Decimal para compatibilidad
+    monto_pago = Decimal(str(monto_pago))
     cur.execute("""SELECT p.id, p.monto_total, p.monto_pagado, p.estado, p.nombre_corto
                    FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
                    WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado NOT IN ('Liquidado', 'Cancelado')
@@ -339,24 +336,29 @@ def registrar_pago(cur, cliente_nombre, monto_pago):
     proyecto = cur.fetchone()
     if not proyecto:
         return None, "No encontré proyectos pendientes para este cliente."
-    proyecto_id, monto_total, monto_pagado, estado_actual, nombre_corto = proyecto
-    nuevo_pagado = monto_pagado + monto_pago
-    saldo = max(0, monto_total - nuevo_pagado)
+    proyecto_id, monto_total, monto_pagado_actual, estado_actual, nombre_corto = proyecto
+    # Convertir a Decimal para operaciones seguras
+    monto_total = Decimal(str(monto_total))
+    monto_pagado_actual = Decimal(str(monto_pagado_actual))
+    nuevo_pagado = monto_pagado_actual + monto_pago
+    saldo = max(Decimal('0'), monto_total - nuevo_pagado)
     nuevo_estado = "Liquidado" if saldo == 0 else "Por cobrar"
     if monto_pago > 0 and estado_actual == "Pendiente de cotizar":
         nuevo_estado = "En proceso"
     cur.execute("UPDATE proyectos SET monto_pagado = %s, estado = %s WHERE id = %s", 
-                (nuevo_pagado, nuevo_estado, proyecto_id))
-    return proyecto_id, f"{nombre_corto}: Anticipo/Pago ${monto_pago:.2f}. Saldo: ${saldo:.2f}. Estado: {nuevo_estado}"
+                (float(nuevo_pagado), nuevo_estado, proyecto_id))
+    return proyecto_id, f"{nombre_corto}: Anticipo/Pago ${float(monto_pago):.2f}. Saldo: ${float(saldo):.2f}. Estado: {nuevo_estado}"
 
 def marcar_material_comprado(cur, proyecto_id, costo=None):
+    if costo is not None:
+        costo = Decimal(str(costo))
     cur.execute("""
         UPDATE proyectos 
         SET material_comprado = TRUE, 
             fecha_compra_material = CURRENT_TIMESTAMP,
             costo_material = COALESCE(%s, costo_material)
         WHERE id = %s
-    """, (costo, proyecto_id))
+    """, (float(costo) if costo is not None else None, proyecto_id))
     return cur.rowcount > 0
 
 def consultar_material_cliente(cur, cliente_nombre):
@@ -417,7 +419,7 @@ def consultar_proyectos(cur, tipo_consulta, cliente_nombre=None):
                 ORDER BY c.nombre, p.fecha_creacion DESC
             """)
         return cur.fetchall()
-    else:  # activos o defecto
+    else:  # activos
         if cliente_nombre:
             cur.execute("""
                 SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
@@ -443,12 +445,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "¡Hola, jefe! 🛠️ Su secretario está listo.\n\n"
         "Solo hable conmigo como lo haría con su asistente.\n"
-        "Puede decir cosas como:\n"
-        "- 'Registra a Juan Pérez, 2 ventanas negras'\n"
-        "- '¿Ya se entregó presupuesto a Juan?'\n"
+        "Ejemplos:\n"
+        "- 'Registra a Juan Pérez, calle siempre viva 123, 2 ventanas negras'\n"
+        "- 'Ya mandé presupuesto a Juan'\n"
         "- 'Quiero eliminar clientes'\n"
         "- 'Gasté 200 en gasolina'\n"
-        "Yo interpreto todo y hago lo necesario."
+        "Yo pregunto lo que falte."
     )
 
 async def comando_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -606,7 +608,7 @@ async def comando_gastos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
 
-# ==================== MANEJO DE BORRADO GRANULAR CON CLIENTE ====================
+# ==================== MANEJO DE BORRADO GRANULAR ====================
 async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, tipo=None, cliente=None):
     if tipo is None:
         await update.message.reply_text(
@@ -624,7 +626,7 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
     cur = conn.cursor()
 
     if tipo == "gastos":
-        items = obtener_gastos(cur)  # (id, desc, monto, fecha)
+        items = obtener_gastos(cur)
         cur.close(); conn.close()
         if not items:
             await update.message.reply_text(f"📭 No hay gastos para borrar, jefe.")
@@ -642,7 +644,6 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
                 items = []
                 for row in items_raw:
                     cliente_nombre_db = row[-1] if len(row) > 10 else "Desconocido"
-                    # row[0] es el ID
                     items.append((row[0], cliente_nombre_db, row[1], row[2], row[3], row[5]))
                 label = "activos"
                 icono = "📋"
@@ -670,7 +671,6 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
 
         cur.close(); conn.close()
         if not items:
-            # Depuración: mostrar estados reales
             conn_debug = get_db_connection()
             cur_debug = conn_debug.cursor()
             cur_debug.execute("SELECT DISTINCT estado FROM proyectos")
@@ -770,17 +770,15 @@ async def procesar_confirmacion_borrado(update: Update, context: ContextTypes.DE
             borrados = borrar_gastos_por_ids(cur, ids)
         else:
             borrados = borrar_proyectos_por_ids(cur, ids)
-            # Después de borrar proyectos, limpiar clientes huérfanos
+            # Limpiar clientes huérfanos
             clientes_eliminados = limpiar_clientes_huérfanos(cur)
         conn.commit()
         cur.close(); conn.close()
 
-        # Mensaje de confirmación
-        msg = f"🗑️ {borrados} elementos borrados definitivamente, jefe."
-        if tipo != 'gastos' and 'clientes_eliminados' in locals() and clientes_eliminados > 0:
-            msg += f"\n🧹 También se eliminaron {clientes_eliminados} clientes sin proyectos."
-
-        await update.message.reply_text(msg)
+        mensaje = f"🗑️ {borrados} proyectos borrados definitivamente, jefe."
+        if clientes_eliminados > 0:
+            mensaje += f" 🧹 También se eliminaron {clientes_eliminados} clientes sin proyectos."
+        await update.message.reply_text(mensaje)
 
         context.user_data['estado_espera'] = None
         context.user_data['borrar_ids'] = None
@@ -929,8 +927,10 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
         buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
         cliente_id = buscar_o_crear_cliente(cur, cliente_nombre)
         registrar_proyecto(cur, cliente_id, nombre_corto, descripcion or nombre_corto, monto, estado, notas)
-        respuesta = f"✅ Nuevo proyecto guardado, jefe: {resumen_ia}\n Total: ${monto:.2f}"
         conn.commit(); cur.close(); conn.close()
+        respuesta = f"✅ Nuevo proyecto guardado, jefe: {resumen_ia}\n Total: ${monto:.2f}"
+        if monto == 0:
+            respuesta += "\n\n📌 Recuerda que puedes actualizar el monto después."
         await update.message.reply_text(respuesta)
         return False
 
@@ -993,8 +993,8 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
     if accion == "registrar_pago":
         buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion)
         _, msg_pago = registrar_pago(cur, cliente_nombre, monto)
-        respuesta = f"💰 Pago registrado: {resumen_ia}\n{msg_pago}"
         conn.commit(); cur.close(); conn.close()
+        respuesta = f"💰 Pago registrado: {resumen_ia}\n{msg_pago}"
         await update.message.reply_text(respuesta)
         return False
 
@@ -1338,5 +1338,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot 100% IA actualizado: borra proyectos y clientes huérfanos automáticamente.")
+    print("🤖 Bot DEFINITIVO: preguntas proactivas, errores de Decimal corregidos, limpieza de huérfanos...")
     app.run_polling(drop_pending_updates=True)
