@@ -72,6 +72,16 @@ _PALABRAS_CIERRE = (
 ORDEN_ESTADOS = ["Cancelado", "Pendiente de cotizar", "Presupuesto enviado",
                   "Aceptado", "En proceso", "Por cobrar", "Liquidado"]
 
+# ==================== MAPA DE PALABRAS NUMÉRICAS ====================
+_PALABRAS_NUMERO = {
+    "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5,
+    "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10,
+    "once": 11, "doce": 12, "trece": 13, "catorce": 14, "quince": 15,
+    "dieciséis": 16, "diecisiete": 17, "dieciocho": 18, "diecinueve": 19, "veinte": 20,
+    "primero": 1, "segundo": 2, "tercero": 3, "cuarto": 4, "quinto": 5,
+    "sexto": 6, "séptimo": 7, "octavo": 8, "noveno": 9, "décimo": 10
+}
+
 # ==================== FUNCIONES DE VALIDACIÓN Y CORRECCIÓN ====================
 def validar_accion(datos: dict) -> str | None:
     if not isinstance(datos, dict):
@@ -121,13 +131,32 @@ def _es_confirmacion(texto: str) -> bool:
     return False
 
 def _es_respuesta_numerica_simple(texto: str) -> float | None:
-    numeros = re.findall(r'\d+(?:\.\d+)?', texto)
-    if not numeros:
-        return None
-    try:
-        return float(numeros[0])
-    except ValueError:
-        return None
+    """Extrae un número de la respuesta del usuario, buscando dígitos o palabras numéricas."""
+    texto_limpio = texto.lower().strip()
+    
+    # Buscar dígitos
+    numeros = re.findall(r'\d+(?:\.\d+)?', texto_limpio)
+    if numeros:
+        try:
+            return float(numeros[0])
+        except ValueError:
+            pass
+    
+    # Buscar palabras numéricas
+    for palabra, valor in _PALABRAS_NUMERO.items():
+        if palabra in texto_limpio:
+            if re.search(rf'\b{palabra}\b', texto_limpio):
+                return float(valor)
+    
+    # Buscar números ordinales como "1°", "1er", etc.
+    ordinal = re.search(r'(\d+)\s*(?:°|º|er|ro|do|da)', texto_limpio)
+    if ordinal:
+        try:
+            return float(ordinal.group(1))
+        except ValueError:
+            pass
+    
+    return None
 
 def _parece_descripcion_de_trabajo(texto_original: str) -> bool:
     t = texto_original.lower()
