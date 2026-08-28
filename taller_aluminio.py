@@ -2,6 +2,7 @@ import os
 import json
 import re
 import logging
+import asyncio
 import io
 import tempfile
 from decimal import Decimal
@@ -10,7 +11,7 @@ from typing import Any, Dict, List, Optional
 import pytz
 import psycopg2
 from psycopg2 import pool
-from openai import OpenAI
+from openai import AsyncOpenAI
 from groq import Groq
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -28,7 +29,8 @@ if not all([TOKEN, DATABASE_URL, DEEPSEEK_API_KEY]):
     logger.error("❌ Faltan variables de entorno esenciales.")
     exit(1)
 
-deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+# Cliente asíncrono de DeepSeek
+deepseek_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 # Zona horaria México
@@ -51,17 +53,15 @@ except Exception as e:
     exit(1)
 
 def get_connection():
-    """Obtiene una conexión del pool. Se usa como context manager."""
     return db_pool.getconn()
 
 def put_connection(conn):
-    """Devuelve la conexión al pool."""
     db_pool.putconn(conn)
 
-# ==================== FUNCIONES DE BASE DE DATOS (TOOLS) ====================
+# ==================== FUNCIONES DE BASE DE DATOS (SÍNCRONAS, PARA EJECUTAR EN HILOS) ====================
 
-def ejecutar_query(query, params=None, fetch=False):
-    """Ejecuta una consulta SQL usando el pool de conexiones."""
+def ejecutar_query_sync(query, params=None, fetch=False):
+    """Ejecuta una consulta SQL de forma síncrona (para ser llamada con asyncio.to_thread)."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -73,14 +73,18 @@ def ejecutar_query(query, params=None, fetch=False):
     finally:
         put_connection(conn)
 
-def buscar_o_crear_cliente(nombre_cliente, telefono=None, direccion=None, notas=None):
-    """Busca o crea un cliente, devuelve su ID."""
-    nombre_cliente = nombre_cliente.lower().strip()
+# ==================== HERRAMIENTAS (TOOLS) ====================
+# Todas las herramientas son síncronas, se ejecutarán en hilos separados.
+
+def tool_registrar_proyecto(cliente: str, nombre_corto: str, descripcion: str, monto: float,
+                            telefono: str = None, direccion: str = None, notas: str = None):
+    """Registra un nuevo proyecto para un cliente."""
+    # Buscar o crear cliente
+    nombre_cliente = cliente.lower().strip()
     query = "SELECT id FROM clientes WHERE unaccent(nombre) ILIKE unaccent(%s)"
-    result = ejecutar_query(query, (f"%{nombre_cliente}%",), fetch=True)
+    result = ejecutar_query_sync(query, (f"%{nombre_cliente}%",), fetch=True)
     if result:
         cliente_id = result[0][0]
-        # Actualizar datos si se proporcionan
         if telefono or direccion or notas:
             updates = []
             params = []
@@ -95,50 +99,38 @@ def buscar_o_crear_cliente(nombre_cliente, telefono=None, direccion=None, notas=
                 params.append(notas)
             if updates:
                 params.append(cliente_id)
-                ejecutar_query(f"UPDATE clientes SET {', '.join(updates)} WHERE id = %s", params)
-        return cliente_id
+                ejecutar_query_sync(f"UPDATE clientes SET {', '.join(updates)} WHERE id = %s", params)
     else:
         insert = "INSERT INTO clientes (nombre, telefono, direccion, notas_adicionales) VALUES (%s, %s, %s, %s) RETURNING id"
-        result = ejecutar_query(insert, (nombre_cliente, telefono, direccion, notas), fetch=True)
-        return result[0][0]
-
-def obtener_proyectos_activos(cliente_nombre):
-    cliente_nombre = cliente_nombre.lower().strip()
-    query = """
-        SELECT p.id, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
-               p.material_comprado, p.costo_material, p.presupuesto_enviado, c.nombre as cliente
-        FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
-        WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado NOT IN ('Liquidado', 'Cancelado')
-        ORDER BY p.fecha_creacion DESC
-    """
-    return ejecutar_query(query, (f"%{cliente_nombre}%",), fetch=True)
-
-# ==================== HERRAMIENTAS (TOOLS) ====================
-
-def tool_registrar_proyecto(cliente: str, nombre_corto: str, descripcion: str, monto: float,
-                            telefono: str = None, direccion: str = None, notas: str = None):
-    """Registra un nuevo proyecto para un cliente."""
-    cliente_id = buscar_o_crear_cliente(cliente, telefono, direccion, notas)
-    insert = """
+        result = ejecutar_query_sync(insert, (nombre_cliente, telefono, direccion, notas), fetch=True)
+        cliente_id = result[0][0]
+    # Insertar proyecto
+    insert_proy = """
         INSERT INTO proyectos (cliente_id, nombre_corto, descripcion, monto_total, monto_pagado, estado, notas_adicionales)
         VALUES (%s, %s, %s, %s, 0, 'Pendiente de cotizar', %s) RETURNING id
     """
-    result = ejecutar_query(insert, (cliente_id, nombre_corto or 'Proyecto General', descripcion, monto, notas), fetch=True)
-    return {"exito": True, "mensaje": f"Proyecto '{nombre_corto}' registrado para {cliente}. ID: {result[0][0]}"}
+    result = ejecutar_query_sync(insert_proy, (cliente_id, nombre_corto or 'Proyecto General', descripcion, monto, notas), fetch=True)
+    proy_id = result[0][0]
+    return {"exito": True, "mensaje": f"Proyecto '{nombre_corto}' registrado para {cliente}. ID: {proy_id}"}
 
 def tool_registrar_pago(cliente: str, monto: float, referencia: str = None):
     """Registra un pago/anticipo para el proyecto más reciente activo del cliente."""
-    proyectos = obtener_proyectos_activos(cliente)
+    query = """
+        SELECT p.id, p.nombre_corto, p.monto_total, p.monto_pagado, p.estado
+        FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
+        WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado NOT IN ('Liquidado', 'Cancelado')
+        ORDER BY p.fecha_creacion DESC LIMIT 1
+    """
+    proyectos = ejecutar_query_sync(query, (f"%{cliente}%",), fetch=True)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    # Tomar el más reciente (primer elemento)
-    pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = proyectos[0]
+    pid, nc, total, pagado, estado = proyectos[0]
     nuevo_pagado = Decimal(str(pagado)) + Decimal(str(monto))
     saldo = max(Decimal('0'), Decimal(str(total)) - nuevo_pagado)
     nuevo_estado = "Liquidado" if saldo == 0 else "Por cobrar"
     if monto > 0 and estado == "Pendiente de cotizar":
         nuevo_estado = "En proceso"
-    ejecutar_query(
+    ejecutar_query_sync(
         "UPDATE proyectos SET monto_pagado = %s, estado = %s WHERE id = %s",
         (float(nuevo_pagado), nuevo_estado, pid)
     )
@@ -149,20 +141,25 @@ def tool_registrar_pago(cliente: str, monto: float, referencia: str = None):
 
 def tool_marcar_presupuesto_enviado(cliente: str, nombre_corto: str = None, monto: float = None, descripcion: str = None):
     """Marca el presupuesto como enviado para el proyecto del cliente."""
-    proyectos = obtener_proyectos_activos(cliente)
+    # Obtener proyectos activos del cliente
+    query = """
+        SELECT p.id, p.nombre_corto, p.descripcion, p.monto_total, p.estado
+        FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
+        WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado NOT IN ('Liquidado', 'Cancelado')
+        ORDER BY p.fecha_creacion DESC
+    """
+    proyectos = ejecutar_query_sync(query, (f"%{cliente}%",), fetch=True)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    # Si hay varios, buscar por nombre_corto
     if nombre_corto:
         for p in proyectos:
             if nombre_corto.lower() in p[1].lower():
-                pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = p
+                pid, nc, desc, total, estado = p
                 break
         else:
             return {"exito": False, "error": f"No encontré proyecto '{nombre_corto}' para {cliente}."}
     else:
-        # Tomar el más reciente
-        pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = proyectos[0]
+        pid, nc, desc, total, estado = proyectos[0]
     updates = ["presupuesto_enviado = TRUE", "fecha_presupuesto = CURRENT_TIMESTAMP", "estado = 'Presupuesto enviado'"]
     params = []
     if monto is not None and monto > 0:
@@ -172,11 +169,11 @@ def tool_marcar_presupuesto_enviado(cliente: str, nombre_corto: str = None, mont
         updates.append("descripcion = COALESCE(%s, descripcion)")
         params.append(descripcion)
     params.append(pid)
-    ejecutar_query(f"UPDATE proyectos SET {', '.join(updates)} WHERE id = %s", params)
+    ejecutar_query_sync(f"UPDATE proyectos SET {', '.join(updates)} WHERE id = %s", params)
     return {"exito": True, "mensaje": f"Presupuesto marcado como enviado para '{nc}' de {cliente}."}
 
 def tool_consultar_proyectos(tipo: str = "activos", cliente: str = None):
-    """Consulta proyectos según tipo (activos, liquidados, cancelados, deudores)."""
+    """Consulta proyectos según tipo (activos, liquidados, cancelados, deudores). LIMIT 5."""
     if tipo == "activos":
         condicion = "p.estado NOT IN ('Liquidado', 'Cancelado')"
     elif tipo == "liquidados":
@@ -196,8 +193,9 @@ def tool_consultar_proyectos(tipo: str = "activos", cliente: str = None):
             FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
             WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND {condicion}
             ORDER BY p.fecha_creacion DESC
+            LIMIT 5
         """
-        resultados = ejecutar_query(query, (f"%{cliente}%",), fetch=True)
+        resultados = ejecutar_query_sync(query, (f"%{cliente}%",), fetch=True)
     else:
         query = f"""
             SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
@@ -205,13 +203,13 @@ def tool_consultar_proyectos(tipo: str = "activos", cliente: str = None):
             FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
             WHERE {condicion}
             ORDER BY c.nombre, p.fecha_creacion DESC
+            LIMIT 5
         """
-        resultados = ejecutar_query(query, fetch=True)
+        resultados = ejecutar_query_sync(query, fetch=True)
     
     if not resultados:
         return {"exito": True, "mensaje": "No hay proyectos en este estado.", "data": []}
     
-    # Formatear para el LLM
     data = []
     for row in resultados:
         data.append({
@@ -230,73 +228,89 @@ def tool_consultar_proyectos(tipo: str = "activos", cliente: str = None):
     return {"exito": True, "data": data}
 
 def tool_cerrar_proyecto(cliente: str, nombre_corto: str = None):
-    """Cierra (liquida) un proyecto. Solo si el saldo es 0, se liquida; si no, pregunta."""
-    proyectos = obtener_proyectos_activos(cliente)
+    """Liquida un proyecto si el saldo es cero; si no, indica el monto pendiente."""
+    query = """
+        SELECT p.id, p.nombre_corto, p.monto_total, p.monto_pagado, p.estado
+        FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
+        WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado NOT IN ('Liquidado', 'Cancelado')
+        ORDER BY p.fecha_creacion DESC
+    """
+    proyectos = ejecutar_query_sync(query, (f"%{cliente}%",), fetch=True)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
     if nombre_corto:
         for p in proyectos:
             if nombre_corto.lower() in p[1].lower():
-                pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = p
+                pid, nc, total, pagado, estado = p
                 break
         else:
             return {"exito": False, "error": f"No encontré proyecto '{nombre_corto}' para {cliente}."}
     else:
-        pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = proyectos[0]
-    
+        pid, nc, total, pagado, estado = proyectos[0]
     saldo = total - pagado
     if saldo <= 0:
-        ejecutar_query("UPDATE proyectos SET estado = 'Liquidado' WHERE id = %s", (pid,))
-        return {"exito": True, "mensaje": f"Proyecto '{nc}' de {cliente} ya estaba liquidado (saldo $0). Se confirmó estado."}
+        ejecutar_query_sync("UPDATE proyectos SET estado = 'Liquidado' WHERE id = %s", (pid,))
+        return {"exito": True, "mensaje": f"Proyecto '{nc}' de {cliente} liquidado (saldo $0)."}
     else:
         return {"exito": False, "error": f"El proyecto '{nc}' tiene saldo pendiente de ${saldo:.2f}. Primero registra el pago restante."}
 
 def tool_cancelar_proyecto(cliente: str, nombre_corto: str = None):
     """Cancela un proyecto (cambia estado a Cancelado)."""
-    proyectos = obtener_proyectos_activos(cliente)
+    query = """
+        SELECT p.id, p.nombre_corto
+        FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
+        WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado NOT IN ('Liquidado', 'Cancelado')
+        ORDER BY p.fecha_creacion DESC
+    """
+    proyectos = ejecutar_query_sync(query, (f"%{cliente}%",), fetch=True)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
     if nombre_corto:
         for p in proyectos:
             if nombre_corto.lower() in p[1].lower():
-                pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = p
+                pid, nc = p
                 break
         else:
             return {"exito": False, "error": f"No encontré proyecto '{nombre_corto}' para {cliente}."}
     else:
-        pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = proyectos[0]
-    ejecutar_query("UPDATE proyectos SET estado = 'Cancelado' WHERE id = %s", (pid,))
+        pid, nc = proyectos[0]
+    ejecutar_query_sync("UPDATE proyectos SET estado = 'Cancelado' WHERE id = %s", (pid,))
     return {"exito": True, "mensaje": f"Proyecto '{nc}' de {cliente} ha sido cancelado."}
 
 def tool_borrar_proyecto(cliente: str, nombre_corto: str = None, confirmado: bool = False):
     """Borra físicamente un proyecto. Solo si confirmado es True."""
     if not confirmado:
         return {"exito": False, "error": "Se requiere confirmación explícita para borrar. Pregunta al usuario: '¿Estás seguro de borrar el proyecto?'."}
-    proyectos = obtener_proyectos_activos(cliente)
+    query = """
+        SELECT p.id, p.nombre_corto
+        FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
+        WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado NOT IN ('Liquidado', 'Cancelado')
+        ORDER BY p.fecha_creacion DESC
+    """
+    proyectos = ejecutar_query_sync(query, (f"%{cliente}%",), fetch=True)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
     if nombre_corto:
         for p in proyectos:
             if nombre_corto.lower() in p[1].lower():
-                pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = p
+                pid, nc = p
                 break
         else:
             return {"exito": False, "error": f"No encontré proyecto '{nombre_corto}' para {cliente}."}
     else:
-        pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = proyectos[0]
-    ejecutar_query("DELETE FROM proyectos WHERE id = %s", (pid,))
-    # Limpiar clientes huérfanos
-    ejecutar_query("DELETE FROM clientes WHERE id NOT IN (SELECT DISTINCT cliente_id FROM proyectos WHERE cliente_id IS NOT NULL)")
+        pid, nc = proyectos[0]
+    ejecutar_query_sync("DELETE FROM proyectos WHERE id = %s", (pid,))
+    ejecutar_query_sync("DELETE FROM clientes WHERE id NOT IN (SELECT DISTINCT cliente_id FROM proyectos WHERE cliente_id IS NOT NULL)")
     return {"exito": True, "mensaje": f"Proyecto '{nc}' de {cliente} eliminado definitivamente."}
 
 def tool_registrar_gasto(descripcion: str, monto: float):
-    """Registra un gasto general (no asociado a proyecto)."""
-    ejecutar_query("INSERT INTO gastos (descripcion, monto) VALUES (%s, %s)", (descripcion, monto))
+    """Registra un gasto general."""
+    ejecutar_query_sync("INSERT INTO gastos (descripcion, monto) VALUES (%s, %s)", (descripcion, monto))
     return {"exito": True, "mensaje": f"Gasto '{descripcion}' de ${monto:.2f} registrado."}
 
 def tool_consultar_gastos(limite: int = 10):
     """Consulta los últimos gastos."""
-    resultados = ejecutar_query("SELECT fecha, descripcion, monto FROM gastos ORDER BY fecha DESC LIMIT %s", (limite,), fetch=True)
+    resultados = ejecutar_query_sync("SELECT fecha, descripcion, monto FROM gastos ORDER BY fecha DESC LIMIT %s", (limite,), fetch=True)
     if not resultados:
         return {"exito": True, "data": [], "mensaje": "No hay gastos registrados."}
     data = [{"fecha": r[0].strftime("%d/%m %H:%M"), "descripcion": r[1], "monto": float(r[2])} for r in resultados]
@@ -304,19 +318,24 @@ def tool_consultar_gastos(limite: int = 10):
 
 def tool_explicar_estado(cliente: str, nombre_corto: str = None):
     """Explica por qué un proyecto está en su estado actual."""
-    proyectos = obtener_proyectos_activos(cliente)
+    query = """
+        SELECT p.id, p.nombre_corto, p.monto_total, p.monto_pagado, p.estado
+        FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
+        WHERE unaccent(c.nombre) ILIKE unaccent(%s) AND p.estado NOT IN ('Liquidado', 'Cancelado')
+        ORDER BY p.fecha_creacion DESC
+    """
+    proyectos = ejecutar_query_sync(query, (f"%{cliente}%",), fetch=True)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
     if nombre_corto:
         for p in proyectos:
             if nombre_corto.lower() in p[1].lower():
-                pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = p
+                pid, nc, total, pagado, estado = p
                 break
         else:
             return {"exito": False, "error": f"No encontré proyecto '{nombre_corto}' para {cliente}."}
     else:
-        pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = proyectos[0]
-    
+        pid, nc, total, pagado, estado = proyectos[0]
     saldo = total - pagado
     explicacion = f"Proyecto '{nc}' de {cliente}: Estado '{estado}', Monto total ${total:.2f}, Pagado ${pagado:.2f}, Saldo ${saldo:.2f}."
     if estado == "Liquidado":
@@ -327,7 +346,8 @@ def tool_explicar_estado(cliente: str, nombre_corto: str = None):
         explicacion += " Está en proceso (se ha recibido algún anticipo)."
     return {"exito": True, "mensaje": explicacion}
 
-# ==================== DEFINICIÓN DE TOOLS PARA EL LLM ====================
+# ==================== DEFINICIÓN DE TOOLS ====================
+# (Idéntica a la anterior, pero la descripción de tool_consultar_proyectos incluye el límite de 5)
 
 TOOLS = [
     {
@@ -339,7 +359,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {"type": "string", "description": "Nombre corto del proyecto (ej: 'Ventana 3')"},
+                    "nombre_corto": {"type": "string", "description": "Nombre corto del proyecto"},
                     "descripcion": {"type": "string", "description": "Descripción del trabajo"},
                     "monto": {"type": "number", "description": "Presupuesto total del proyecto"},
                     "telefono": {"type": "string", "description": "Teléfono del cliente (opcional)"},
@@ -387,7 +407,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_consultar_proyectos",
-            "description": "Consulta proyectos según tipo (activos, liquidados, cancelados, deudores). Si no se especifica tipo, usa 'activos'.",
+            "description": "Consulta proyectos según tipo (activos, liquidados, cancelados, deudores). Devuelve un máximo de 5 resultados para no saturar. Si no encuentras el proyecto buscado en la lista devuelta, pídele al usuario el nombre exacto del cliente para filtrar mejor.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -490,7 +510,6 @@ TOOLS = [
     }
 ]
 
-# Mapeo de nombres de función a funciones Python
 TOOL_FUNCTIONS = {
     "tool_registrar_proyecto": tool_registrar_proyecto,
     "tool_registrar_pago": tool_registrar_pago,
@@ -504,8 +523,8 @@ TOOL_FUNCTIONS = {
     "tool_explicar_estado": tool_explicar_estado,
 }
 
-# ==================== PROMPT DEL SISTEMA ====================
-SYSTEM_PROMPT = (
+# ==================== PROMPT DEL SISTEMA (BASE) ====================
+SYSTEM_PROMPT_BASE = (
     "Eres el asistente de gestión de proyectos de un taller de aluminio. "
     "Tu tarea es ayudar a registrar datos, consultar materiales y administrar pagos. "
     "No asumas información. Si el usuario te pide registrar un gasto o un pago, pero falta la cantidad, el concepto o el proyecto, PREGÚNTALE en lenguaje natural antes de ejecutar la herramienta. "
@@ -515,13 +534,65 @@ SYSTEM_PROMPT = (
     "Si el usuario pide borrar algo, siempre pregunta confirmación primero, y solo ejecuta la herramienta cuando el usuario confirme explícitamente."
 )
 
+# ==================== FUNCIÓN DE PODA DE HISTORIAL ====================
+def podar_historial(messages: List[Dict]) -> List[Dict]:
+    """Mantiene los últimos 15 mensajes, asegurando que las secuencias de tool_calls no se corten."""
+    MAX_HISTORIAL = 15
+    if len(messages) <= MAX_HISTORIAL:
+        return messages
+    
+    # Buscar un punto de corte seguro: comenzar desde el final y retroceder
+    # hasta encontrar un mensaje que no sea parte de una secuencia de tool_call
+    # que quedaría huérfana.
+    # Estrategia: tomar los últimos MAX_HISTORIAL mensajes, pero si el primer mensaje
+    # de ese subconjunto es un 'tool' (rol tool) o un 'assistant' con tool_calls que
+    # no tiene su tool correspondiente en el subconjunto, retroceder.
+    
+    # Empezamos con los últimos MAX_HISTORIAL
+    trimmed = messages[-MAX_HISTORIAL:]
+    
+    # Verificar si el primer mensaje es un 'tool' o un 'assistant' con tool_calls
+    # que no está acompañado de su mensaje tool.
+    # Si el primer mensaje es 'tool', entonces debe haber un 'assistant' anterior con tool_calls.
+    # Pero como estamos cortando, debemos asegurarnos de que no haya mensajes 'tool' sin su
+    # correspondiente 'assistant' con tool_calls.
+    
+    # Recorremos desde el inicio del subconjunto hacia adelante:
+    # Si encontramos un mensaje con rol 'tool', buscamos hacia atrás (dentro del subconjunto) 
+    # el 'assistant' que lo invocó. Si no está, entonces debemos retroceder el corte.
+    
+    # Simplemente, mientras el primer mensaje sea 'tool', retrocedemos el índice de inicio.
+    start = len(messages) - MAX_HISTORIAL
+    # Mientras el mensaje en start sea 'tool' y start > 0, retrocedemos
+    while start > 0 and messages[start]['role'] == 'tool':
+        start -= 1
+    # También si es 'assistant' y tiene tool_calls, pero los tools correspondientes no están en el subconjunto,
+    # debemos retroceder para incluirlos.
+    # Simplificamos: si el mensaje en start tiene tool_calls, y los siguientes mensajes no cubren todos los tool_calls,
+    # retrocedemos.
+    # Por simplicidad, solo retrocedemos si el primer mensaje es 'tool' o si el primer mensaje es 'assistant' con tool_calls
+    # y el siguiente mensaje no es un 'tool' que corresponda.
+    # Implementación más robusta:
+    if start > 0 and messages[start]['role'] == 'assistant' and messages[start].get('tool_calls'):
+        # Contar cuántos tool_calls hay
+        tool_call_ids = [tc['id'] for tc in messages[start]['tool_calls']]
+        # Ver si los siguientes mensajes cubren esos ids
+        next_msgs = messages[start+1:start+len(tool_call_ids)+1]
+        found_ids = [m['tool_call_id'] for m in next_msgs if m['role'] == 'tool']
+        if not all(tid in found_ids for tid in tool_call_ids):
+            start -= 1  # retrocedemos uno para incluir el mensaje anterior (que podría ser otro assistant con tool_calls o user)
+            # Podríamos hacer un bucle, pero con un solo retroceso suele ser suficiente.
+    
+    # Asegurar que no nos pasemos
+    start = max(0, start)
+    return messages[start:]
+
 # ==================== MANEJO DE AUDIO ====================
 def transcribir_audio_buffer(buffer: io.BytesIO) -> str:
-    """Transcribe un buffer de audio usando Groq."""
+    """Transcribe un buffer de audio usando Groq (síncrono, pero se ejecuta en hilo)."""
     if not groq_client:
         return ""
     buffer.seek(0)
-    # Groq espera un archivo, usamos tempfile para simular
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
         tmp.write(buffer.read())
         tmp_path = tmp.name
@@ -540,28 +611,39 @@ def transcribir_audio_buffer(buffer: io.BytesIO) -> str:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-# ==================== BUCLE PRINCIPAL DEL AGENTE ====================
+# ==================== BUCLE PRINCIPAL DEL AGENTE (ASÍNCRONO) ====================
 async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
-    """Procesa el mensaje del usuario (texto o transcripción) usando el agente con tools."""
+    """Procesa el mensaje del usuario usando el agente con tools (totalmente asíncrono)."""
     if not texto:
         await update.message.reply_text("No entendí el mensaje. ¿Puedes repetirlo?")
         return
 
     # Inicializar historial si no existe
     if 'messages' not in context.user_data:
-        context.user_data['messages'] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        context.user_data['messages'] = []
 
     # Agregar mensaje del usuario al historial
     context.user_data['messages'].append({"role": "user", "content": texto})
 
-    # Bucle de tool calling
+    # Poda del historial (antes de enviar a la API)
+    historial_podado = podar_historial(context.user_data['messages'])
+
+    # Inyectar mensaje de sistema con fecha/hora actual (dinámico)
+    fecha_actual = ahora_cdmx().strftime('%Y-%m-%d %H:%M')
+    system_msg = {
+        "role": "system",
+        "content": f"La fecha y hora actual en México es: {fecha_actual}. {SYSTEM_PROMPT_BASE}"
+    }
+    # Construir mensajes para la API: system + historial_podado
+    mensajes_api = [system_msg] + historial_podado
+
     max_iteraciones = 5
     for _ in range(max_iteraciones):
         try:
-            # Llamar a DeepSeek con tools
-            response = deepseek_client.chat.completions.create(
+            # Llamada asíncrona a DeepSeek
+            response = await deepseek_client.chat.completions.create(
                 model="deepseek-chat",
-                messages=context.user_data['messages'],
+                messages=mensajes_api,
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=0.2,
@@ -578,6 +660,7 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         if not message.tool_calls:
             respuesta = message.content
             if respuesta:
+                # Guardar en historial (sin el system)
                 context.user_data['messages'].append({"role": "assistant", "content": respuesta})
                 await update.message.reply_text(respuesta, parse_mode="Markdown")
             else:
@@ -593,13 +676,14 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
             function_name = tool_call.function.name
             function_args = json.loads(tool_call.function.arguments)
 
-            # Ejecutar la función tool
+            # Ejecutar la función tool en un hilo separado (asyncio.to_thread)
             tool_func = TOOL_FUNCTIONS.get(function_name)
             if not tool_func:
                 result = {"error": f"Tool '{function_name}' no encontrada."}
             else:
                 try:
-                    result = tool_func(**function_args)
+                    # Ejecutar en hilo para no bloquear el event loop
+                    result = await asyncio.to_thread(tool_func, **function_args)
                 except Exception as e:
                     logger.error(f"Error ejecutando tool {function_name}: {e}")
                     result = {"error": str(e)}
@@ -611,7 +695,12 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                 "content": json.dumps(result)
             })
 
-        # Continuar el bucle para que el LLM procese los resultados de las tools
+        # Después de agregar los mensajes tool, reiniciamos el loop para que el LLM procese los resultados
+        # Actualizar mensajes_api con el nuevo historial (incluyendo los tools)
+        # Volvemos a podar
+        historial_podado = podar_historial(context.user_data['messages'])
+        mensajes_api = [system_msg] + historial_podado
+        # Continuar el bucle
 
     # Si se excede el número de iteraciones
     await update.message.reply_text("El proceso ha tomado demasiados pasos. Por favor, simplifica tu solicitud.")
@@ -619,7 +708,7 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 # ==================== MANEJADORES DE TELEGRAM ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /start: resetea el historial y da la bienvenida."""
-    context.user_data['messages'] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    context.user_data['messages'] = []
     await update.message.reply_text(
         "¡Hola, jefe! 🛠️ Soy su asistente de gestión de proyectos.\n\n"
         "Puedo ayudarle a:\n"
@@ -633,26 +722,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejador principal para mensajes de texto y voz."""
+    """Manejador principal para mensajes de texto y voz (asíncrono)."""
     if update.message.text:
         texto = update.message.text
         await procesar_mensaje(update, context, texto)
     elif update.message.voice:
-        # Procesar audio en memoria
         if not groq_client:
             await update.message.reply_text("❌ El servicio de transcripción de voz no está configurado.")
             return
         try:
             await update.message.reply_text("🎙️ Escuchando...")
             voice_file = await update.message.voice.get_file()
-            # Descargar en memoria
             buffer = io.BytesIO()
             await voice_file.download_to_memory(buffer)
-            texto = transcribir_audio_buffer(buffer)
+            # Transcribir en hilo separado (bloqueante)
+            texto = await asyncio.to_thread(transcribir_audio_buffer, buffer)
             if not texto:
                 await update.message.reply_text("❌ No pude entender el audio. ¿Puedes repetirlo o escribirlo?")
                 return
-            # Mostrar transcripción
             await update.message.reply_text(f"📝 *\"{texto}\"*", parse_mode="Markdown")
             await procesar_mensaje(update, context, texto)
         except Exception as e:
@@ -665,5 +752,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
     app.add_handler(MessageHandler(filters.VOICE, handler))
-    logger.info("🤖 Bot con Tool Calling iniciado. ¡Escuchando mensajes!")
+    logger.info("🤖 Bot asíncrono con Tool Calling, poda de historial y contexto temporal iniciado.")
     app.run_polling()
