@@ -25,7 +25,6 @@ def get_db_connection():
 
 # ==================== INTELIGENCIA ARTIFICIAL (PROMPT MEJORADO) ====================
 def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_existentes=""):
-    # Obtener lista de clientes reales
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT nombre FROM clientes ORDER BY nombre")
@@ -36,7 +35,7 @@ def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_exis
     contexto_historial = ""
     if historial_mensajes:
         contexto_historial = "[Historial de los últimos mensajes]:\n"
-        for msg in historial_mensajes[-10:]:
+        for msg in historial_mensajes[-12:]:
             contexto_historial += f"- {msg}\n"
     
     texto_analisis = texto
@@ -58,21 +57,21 @@ CLIENTES REGISTRADOS (usa estos nombres EXACTOS cuando reconozcas a un cliente):
 {', '.join(clientes_reales) if clientes_reales else 'Aún no hay clientes registrados.'}
 
 REGLAS ESTRICTAS (LEE CON ATENCIÓN):
-1. **PREGUNTA SIEMPRE DATOS FALTANTES**: Si el jefe registra un cliente/proyecto y falta información importante (dirección, teléfono, monto del presupuesto, etc.), usa accion "preguntar" y pregunta específicamente qué falta. No guardes un proyecto sin monto sin preguntar.
+1. **PREGUNTA DATOS FALTANTES**: Si el jefe registra un cliente/proyecto y falta información como el monto del presupuesto, usa accion "preguntar". Pero si el jefe dice "pendiente", "no sé", "después", "no hay monto" o "sin presupuesto", interpreta eso como monto = 0 y registra el proyecto igual.
 2. **CONFIRMACIONES**: "si", "sí", "esta bien", "ok" → NO crees nuevo proyecto, solo confirma lo anterior.
-3. **NUEVO PROYECTO**: "registra", "anota", "nuevo" + cliente + trabajo. Si falta monto, pregunta "¿Cuál es el presupuesto total?".
-4. **PRESUPUESTO ENVIADO**: Si dice "ya mandé presupuesto" o "entregué presupuesto", accion "marcar_presupuesto_enviado". Esto también debe actualizar el estado a "Presupuesto enviado".
-5. **PAGO/ANTICIPO**: Si menciona pago o anticipo, accion "registrar_pago". Siempre pregunta el monto si no lo da.
-6. **MATERIAL**: "compré material" + cliente → accion "registrar_compra_material". Si no da el costo, pregunta.
-7. **CONSULTAS**: "qué clientes tengo" → "consultar" con tipo_consulta "activos". "clientes cancelados" → "consultar" con tipo_consulta "cancelados". "liquidados" → similar.
-8. **BORRAR**: "borra", "elimina", "quiero eliminar clientes" → accion "iniciar_borrado". Si no especifica tipo, pregunta si activos, cancelados, liquidados o gastos.
-9. **GASTOS**: "gasté", "gaste" sin cliente → accion "registrar_gasto". "gastos" → "consultar_gastos". "borrar gastos" → "iniciar_borrado" tipo "gastos".
+3. **NUEVO PROYECTO**: "registra", "anota", "nuevo" + cliente + trabajo. Si falta monto, pregunta una sola vez. Si el jefe responde "pendiente", "no sé" o similar, guarda con monto 0.
+4. **PRESUPUESTO ENVIADO**: "ya mandé presupuesto" → accion "marcar_presupuesto_enviado". Actualiza estado a "Presupuesto enviado".
+5. **PAGO/ANTICIPO**: "pago", "anticipo" + cliente → accion "registrar_pago". Si no da monto, pregunta.
+6. **MATERIAL**: "compré material" + cliente → accion "registrar_compra_material". Si no da costo, pregunta.
+7. **CONSULTAS**: "qué clientes tengo" → "consultar" tipo "activos". "liquidados" → tipo "liquidados". "cancelados" → tipo "cancelados".
+8. **BORRAR**: "borra", "elimina", "quiero eliminar clientes" → accion "iniciar_borrado".
+9. **GASTOS**: "gasté" sin cliente → "registrar_gasto". "gastos" → "consultar_gastos".
 
 Responde SOLO con JSON:
 {{
   "accion": "registrar_proyecto" | "registrar_pago" | "actualizar_proyecto" | "marcar_presupuesto_enviado" | "cancelar_proyecto" | "iniciar_borrado" | "consultar" | "consultar_historial" | "consultar_material" | "consultar_presupuesto" | "registrar_compra_material" | "registrar_gasto" | "consultar_gastos" | "preguntar",
   "cliente": "nombre",
-  "nombre_corto": "nombre breve del proyecto (máximo 30 caracteres)",
+  "nombre_corto": "nombre breve (máx 30 caracteres)",
   "monto": numero o 0,
   "descripcion": "detalles",
   "notas": "",
@@ -80,7 +79,7 @@ Responde SOLO con JSON:
   "tipo_borrado": "activos" | "cancelados" | "liquidados" | "gastos",
   "tipo_consulta": "activos" | "cancelados" | "liquidados" | "deudores" | "pendientes" | "todos",
   "pregunta": "texto de la pregunta (solo si accion es preguntar)",
-  "resumen": "frase corta de lo que harás"
+  "resumen": "frase corta"
 }}
 
 {contexto_historial}
@@ -192,7 +191,6 @@ def limpiar_clientes_huérfanos(cur):
     """)
     return cur.rowcount
 
-# ===== FUNCIÓN DE BORRADO CORREGIDA =====
 def borrar_proyectos_por_ids(cur, ids):
     ids_int = []
     for id_item in ids:
@@ -327,7 +325,6 @@ def cancelar_proyecto_especifico(cur, cliente_nombre, nombre_corto):
     return False
 
 def registrar_pago(cur, cliente_nombre, monto_pago):
-    # Convertir monto_pago a Decimal para compatibilidad
     monto_pago = Decimal(str(monto_pago))
     cur.execute("""SELECT p.id, p.monto_total, p.monto_pagado, p.estado, p.nombre_corto
                    FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
@@ -337,7 +334,6 @@ def registrar_pago(cur, cliente_nombre, monto_pago):
     if not proyecto:
         return None, "No encontré proyectos pendientes para este cliente."
     proyecto_id, monto_total, monto_pagado_actual, estado_actual, nombre_corto = proyecto
-    # Convertir a Decimal para operaciones seguras
     monto_total = Decimal(str(monto_total))
     monto_pagado_actual = Decimal(str(monto_pagado_actual))
     nuevo_pagado = monto_pagado_actual + monto_pago
@@ -447,10 +443,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Solo hable conmigo como lo haría con su asistente.\n"
         "Ejemplos:\n"
         "- 'Registra a Juan Pérez, calle siempre viva 123, 2 ventanas negras'\n"
+        "- 'El presupuesto es de 8000'\n"
         "- 'Ya mandé presupuesto a Juan'\n"
         "- 'Quiero eliminar clientes'\n"
-        "- 'Gasté 200 en gasolina'\n"
-        "Yo pregunto lo que falte."
+        "Si no tiene el presupuesto, diga 'pendiente' y lo guardo igual."
     )
 
 async def comando_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -768,9 +764,9 @@ async def procesar_confirmacion_borrado(update: Update, context: ContextTypes.DE
         cur = conn.cursor()
         if tipo == 'gastos':
             borrados = borrar_gastos_por_ids(cur, ids)
+            clientes_eliminados = 0
         else:
             borrados = borrar_proyectos_por_ids(cur, ids)
-            # Limpiar clientes huérfanos
             clientes_eliminados = limpiar_clientes_huérfanos(cur)
         conn.commit()
         cur.close(); conn.close()
@@ -924,13 +920,16 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
             return False
 
     if accion == "registrar_proyecto":
+        # Si el monto es 0 y la descripción contiene "pendiente", es intencional
+        if monto == 0 and "pendiente" in descripcion.lower():
+            estado = "Pendiente de cotizar"
         buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
         cliente_id = buscar_o_crear_cliente(cur, cliente_nombre)
         registrar_proyecto(cur, cliente_id, nombre_corto, descripcion or nombre_corto, monto, estado, notas)
         conn.commit(); cur.close(); conn.close()
         respuesta = f"✅ Nuevo proyecto guardado, jefe: {resumen_ia}\n Total: ${monto:.2f}"
         if monto == 0:
-            respuesta += "\n\n📌 Recuerda que puedes actualizar el monto después."
+            respuesta += "\n\n📌 Recuerda que puedes actualizar el monto después o poner 'pendiente' si no lo tienes."
         await update.message.reply_text(respuesta)
         return False
 
@@ -1338,5 +1337,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot DEFINITIVO: preguntas proactivas, errores de Decimal corregidos, limpieza de huérfanos...")
+    print("🤖 Bot CORREGIDO: interpreta 'pendiente', mantiene contexto, registra sin monto...")
     app.run_polling(drop_pending_updates=True)
