@@ -24,6 +24,7 @@ def get_db_connection():
 
 # ==================== INTELIGENCIA ARTIFICIAL ====================
 def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_existentes=""):
+    # Obtener lista de clientes reales para que la IA elija el nombre correcto
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT nombre FROM clientes ORDER BY nombre")
@@ -188,7 +189,7 @@ def registrar_gasto(cur, descripcion, monto):
     cur.execute("INSERT INTO gastos (descripcion, monto) VALUES (%s, %s) RETURNING id", (descripcion, monto))
     return cur.fetchone()[0]
 
-# ===== FUNCIÓN DE BORRADO CORREGIDA (Qwen) =====
+# ===== FUNCIÓN DE BORRADO CORREGIDA (IDs numéricos) =====
 def borrar_proyectos_por_ids(cur, ids):
     """Asegura que ids sea una lista de enteros válidos antes de eliminar."""
     ids_int = []
@@ -432,18 +433,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['cliente_activo'] = ""
     await update.message.reply_text(
         "¡Hola, jefe! 🛠️ Su secretario está listo.\n\n"
-        "Comandos:\n"
-        "/cliente [nombre] - Forzar cliente activo\n"
-        "/estadisticas - Resumen de proyectos\n"
-        "/historial [nombre] - Historial de un cliente\n"
-        "/resumen - Ver clientes activos\n"
-        "/activos - Igual que /resumen\n"
-        "/cancelados - Ver proyectos cancelados\n"
-        "/liquidados - Ver proyectos liquidados\n"
-        "/material [nombre] - Consultar material comprado\n"
-        "/presupuesto [nombre] - Consultar presupuestos enviados\n"
-        "/gastos - Ver últimos gastos\n"
-        "Puede decir 'borra a [cliente]' para borrar proyectos activos de ese cliente."
+        "Solo hable conmigo como lo haría con su asistente.\n"
+        "Puede decir cosas como:\n"
+        "- 'Registra a Juan Pérez, 2 ventanas negras'\n"
+        "- '¿Ya se entregó presupuesto a Juan?'\n"
+        "- 'Quiero eliminar clientes'\n"
+        "- 'Gasté 200 en gasolina'\n"
+        "Yo interpreto todo y hago lo necesario."
     )
 
 async def comando_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -531,47 +527,6 @@ async def comando_resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mat_icon = "🛠️" if mat_comp else "❌"
             msg += f"👤 *{n}*\n   Proyecto: {nc or 'Proyecto General'}\n   Detalle: {desc}\n"
             msg += f"   Total: ${t:.2f} | Pagado: ${p:.2f} | Saldo: ${pendiente:.2f} | {e} | {pres_icon} Presupuesto | {mat_icon} Material\n\n"
-        await update.message.reply_text(msg, parse_mode='Markdown')
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
-
-# ===== NUEVOS COMANDOS PARA CONSULTAS DIRECTAS =====
-async def comando_activos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mismo que /resumen pero explícito."""
-    await comando_resumen(update, context)
-
-async def comando_cancelados(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        proyectos = consultar_proyectos(cur, "cancelados")
-        cur.close(); conn.close()
-        if not proyectos:
-            await update.message.reply_text("📭 No hay proyectos cancelados, jefe.")
-            return
-        msg = "🗑️ **PROYECTOS CANCELADOS:**\n\n"
-        for n, nc, desc, t, p, e, pres_comp, mat_comp in proyectos:
-            pendiente = t - p
-            msg += f"👤 *{n}*\n   Proyecto: {nc or 'Proyecto General'}\n   Detalle: {desc}\n"
-            msg += f"   Total: ${t:.2f} | Pagado: ${p:.2f} | Saldo: ${pendiente:.2f} | {e}\n\n"
-        await update.message.reply_text(msg, parse_mode='Markdown')
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
-
-async def comando_liquidados(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        proyectos = consultar_proyectos(cur, "liquidados")
-        cur.close(); conn.close()
-        if not proyectos:
-            await update.message.reply_text("📭 No hay proyectos liquidados, jefe.")
-            return
-        msg = "✅ **PROYECTOS LIQUIDADOS:**\n\n"
-        for n, nc, desc, t, p, e, pres_comp, mat_comp in proyectos:
-            pendiente = t - p
-            msg += f"👤 *{n}*\n   Proyecto: {nc or 'Proyecto General'}\n   Detalle: {desc}\n"
-            msg += f"   Total: ${t:.2f} | Pagado: ${p:.2f} | Saldo: ${pendiente:.2f} | {e}\n\n"
         await update.message.reply_text(msg, parse_mode='Markdown')
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
@@ -742,7 +697,9 @@ async def iniciar_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE, ti
     context.user_data['estado_espera'] = 'esperando_seleccion_borrado'
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-async def procesar_seleccion_borrado(update: Update, context, respuesta):
+# ===== CORRECCIÓN DE BORRADO: extraer solo IDs numéricos =====
+async def procesar_seleccion_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    respuesta = update.message.text
     try:
         items = context.user_data.get('borrar_items', [])
         tipo = context.user_data.get('borrar_tipo')
@@ -753,7 +710,6 @@ async def procesar_seleccion_borrado(update: Update, context, respuesta):
 
         resp = respuesta.strip().lower()
         if resp == 'todos':
-            # Extraer el ID (primer elemento) y asegurar que sea entero
             ids = [int(item[0]) for item in items if str(item[0]).isdigit()]
         else:
             numeros = re.findall(r'\d+', resp)
@@ -782,7 +738,8 @@ async def procesar_seleccion_borrado(update: Update, context, respuesta):
         await update.message.reply_text(f"❌ Error al procesar selección: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_confirmacion_borrado(update, Update, context, respuesta):
+async def procesar_confirmacion_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    respuesta = update.message.text
     try:
         ids = context.user_data.get('borrar_ids', [])
         tipo = context.user_data.get('borrar_tipo')
@@ -818,7 +775,8 @@ async def procesar_confirmacion_borrado(update, Update, context, respuesta):
         await update.message.reply_text(f"❌ Error al borrar: {str(e)[:100]}")
         context.user_data['estado_espera'] = None
 
-async def procesar_tipo_borrado(update, context, respuesta):
+async def procesar_tipo_borrado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    respuesta = update.message.text
     resp = respuesta.strip()
     if resp == '1':
         await iniciar_borrado(update, context, 'activos')
@@ -1107,11 +1065,11 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         texto = update.message.text
         estado = context.user_data.get('estado_espera')
         if estado == 'esperando_tipo_borrado':
-            await procesar_tipo_borrado(update, context, texto)
+            await procesar_tipo_borrado(update, context)
         elif estado == 'esperando_seleccion_borrado':
-            await procesar_seleccion_borrado(update, context, texto)
+            await procesar_seleccion_borrado(update, context)
         elif estado == 'confirmar_borrado':
-            await procesar_confirmacion_borrado(update, context, texto)
+            await procesar_confirmacion_borrado(update, context)
         elif estado == 'seleccion_material':
             await procesar_seleccion_material(update, context, texto)
         elif estado == 'esperando_costo_material':
@@ -1360,13 +1318,10 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("estadisticas", comando_estadisticas))
     app.add_handler(CommandHandler("historial", comando_historial))
     app.add_handler(CommandHandler("resumen", comando_resumen))
-    app.add_handler(CommandHandler("activos", comando_activos))
-    app.add_handler(CommandHandler("cancelados", comando_cancelados))
-    app.add_handler(CommandHandler("liquidados", comando_liquidados))
     app.add_handler(CommandHandler("material", comando_material))
     app.add_handler(CommandHandler("presupuesto", comando_presupuesto))
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot FINAL con todas las correcciones (Qwen) y comandos directos...")
+    print("🤖 Bot 100% IA actualizado y corregido (bug de IDs solucionado).")
     app.run_polling(drop_pending_updates=True)
