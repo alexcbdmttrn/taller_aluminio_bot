@@ -23,7 +23,7 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# ==================== INTELIGENCIA ARTIFICIAL (PROMPT MEJORADO) ====================
+# ==================== INTELIGENCIA ARTIFICIAL ====================
 def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_existentes=""):
     conn = get_db_connection()
     cur = conn.cursor()
@@ -56,7 +56,7 @@ def analizar_con_ia(texto, historial_mensajes, cliente_activo="", proyectos_exis
 CLIENTES REGISTRADOS (usa estos nombres EXACTOS cuando reconozcas a un cliente):
 {', '.join(clientes_reales) if clientes_reales else 'Aún no hay clientes registrados.'}
 
-REGLAS ESTRICTAS (LEE CON ATENCIÓN):
+REGLAS ESTRICTAS:
 1. **REGISTRO DE CLIENTE**: Cuando el jefe diga "registra a [nombre]", extrae toda la información que puedas: dirección, teléfono, trabajo, monto (si lo da). Si falta el monto del presupuesto, pregunta una sola vez. Si el jefe responde "pendiente", "no sé" o similar, guarda con monto 0.
 2. **PRESUPUESTO ENVIADO**: Cuando el jefe diga "ya mandé presupuesto", "entregué presupuesto", "ya cotice", etc., DEBES interpretar que también puede venir un monto y una descripción del trabajo en el mismo mensaje. Ej: "ya envie presupuesto a abigail de 10000 pesos, son 3 ventanas de aluminio negro con cristal claro" → eso es una sola acción: marcar presupuesto enviado Y actualizar el monto a 10000 Y actualizar la descripción del proyecto.
 3. **ACTUALIZACIONES**: Si el jefe actualiza el monto, la descripción o cualquier dato, debes usar la acción correspondiente (actualizar_proyecto) y pasar todos los campos que se mencionan.
@@ -298,16 +298,11 @@ def actualizar_proyecto(cur, cliente_nombre, nombre_corto, descripcion, monto, e
     return True, []
 
 def marcar_presupuesto_enviado(cur, cliente_nombre, nombre_corto, monto=None, descripcion=None, telefono=None, direccion=None, notas=None):
-    # Primero actualizar el cliente si se dan datos
     if telefono or direccion or notas:
         buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
-    
-    # Buscar el proyecto
     proyecto_id, candidatos = resolver_proyecto_activo(cur, cliente_nombre, nombre_corto or descripcion)
     if proyecto_id is None:
         return False, candidatos
-    
-    # Preparar actualización
     updates = ["presupuesto_enviado = TRUE", "fecha_presupuesto = CURRENT_TIMESTAMP", "estado = 'Presupuesto enviado'"]
     params = []
     if monto is not None and monto > 0:
@@ -912,9 +907,8 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # ===== MARCAR PRESUPUESTO ENVIADO (CON ACTUALIZACIONES ADICIONALES) =====
+    # ===== MARCAR PRESUPUESTO ENVIADO =====
     if accion == "marcar_presupuesto_enviado":
-        # Pasamos todos los datos que la IA haya extraído
         marcado, candidatos = marcar_presupuesto_enviado(
             cur, cliente_nombre, nombre_corto,
             monto=monto if monto > 0 else None,
@@ -954,7 +948,6 @@ async def ejecutar_una_accion(datos: dict, update: Update, context: ContextTypes
 
     # ===== REGISTRAR PROYECTO =====
     if accion == "registrar_proyecto":
-        # Guardar cliente con todos los datos
         buscar_o_crear_cliente(cur, cliente_nombre, telefono, direccion, notas)
         cliente_id = buscar_o_crear_cliente(cur, cliente_nombre)
         registrar_proyecto(cur, cliente_id, nombre_corto, descripcion or nombre_corto, monto, estado, notas)
@@ -1110,7 +1103,7 @@ async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         logging.error(f"🔴 Error: {e}")
         await update.message.reply_text(f"❌ Error interno: {str(e)[:150]}. Lo siento, jefe.")
 
-# ==================== MANEJO DE MENSAJES ====================
+# ==================== MANEJO DE MENSAJES (CORREGIDO) ====================
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text:
         texto = update.message.text
@@ -1142,7 +1135,8 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             texto = transcribir_audio(ruta)
             os.remove(ruta)
             await update.message.reply_text(f"📝 *\"{texto}\"*", parse_mode='Markdown')
-            await manejar_mensaje(update, context)
+            # CORRECCIÓN: Procesar el texto directamente, sin llamar a manejar_mensaje
+            await procesar_texto(update, context, texto)
         except Exception as e:
             await update.message.reply_text(f"❌ Error de audio: {str(e)[:100]}. Disculpe, jefe.")
 
@@ -1301,7 +1295,6 @@ async def procesar_seleccion_presupuesto(update, context, respuesta):
             return
         conn = get_db_connection()
         cur = conn.cursor()
-        # Actualizar con los datos del presupuesto
         cur.execute("""
             UPDATE proyectos 
             SET presupuesto_enviado = TRUE, 
@@ -1312,7 +1305,6 @@ async def procesar_seleccion_presupuesto(update, context, respuesta):
                 notas_adicionales = COALESCE(%s, notas_adicionales)
             WHERE id = %s
         """, (datos.get('monto', 0), datos.get('monto', 0), datos.get('descripcion'), datos.get('notas'), pid))
-        # Actualizar cliente si se dieron datos
         if datos.get('telefono') or datos.get('direccion'):
             buscar_o_crear_cliente(cur, cliente_nombre, datos.get('telefono'), datos.get('direccion'))
         conn.commit()
@@ -1389,5 +1381,5 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("gastos", comando_gastos))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
     app.add_handler(MessageHandler(filters.VOICE, manejar_mensaje))
-    print("🤖 Bot DEFINITIVO: registra y actualiza correctamente, con presupuesto y descripción. VERSION FINAL.")
+    print("🤖 Bot CORREGIDO: sin bucle de audio. Iniciado...")
     app.run_polling(drop_pending_updates=True)
