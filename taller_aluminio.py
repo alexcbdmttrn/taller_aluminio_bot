@@ -109,21 +109,19 @@ async def buscar_o_crear_cliente(nombre_cliente, telefono=None, direccion=None, 
             updates = []
             params = []
             if telefono:
-                updates.append("telefono = $1")
+                updates.append(f"telefono = ${len(params)+1}")
                 params.append(telefono)
             if direccion:
-                updates.append("direccion = $2")
+                updates.append(f"direccion = ${len(params)+1}")
                 params.append(direccion)
             if notas:
-                updates.append("notas_adicionales = $3")
+                updates.append(f"notas_adicionales = ${len(params)+1}")
                 params.append(notas)
             if updates:
                 params.append(cliente_id)
-                set_clause_final = ", ".join(
-                    [f"{col.split(' ')[0]} = ${i+1}" for i, col in enumerate(updates)]
-                )
+                set_clause = ", ".join(updates)
                 await ejecutar_query(
-                    f"UPDATE clientes SET {set_clause_final} WHERE id = ${len(params)}",
+                    f"UPDATE clientes SET {set_clause} WHERE id = ${len(params)}",
                     params,
                 )
         return cliente_id
@@ -487,6 +485,47 @@ async def tool_explicar_estado(cliente: str, nombre_corto: str = None):
     return {"exito": True, "mensaje": explicacion}
 
 
+# ===== NUEVA HERRAMIENTA: EDITAR CLIENTE =====
+async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str = None, notas: str = None):
+    """Edita la información de un cliente existente (teléfono, dirección, notas)."""
+    query_buscar = "SELECT id, nombre FROM clientes WHERE unaccent(nombre) ILIKE unaccent($1)"
+    resultado = await ejecutar_query(query_buscar, (f"%{cliente.lower().strip()}%",), fetch=True)
+
+    if not resultado:
+        return {"exito": False, "error": f"No encontré un cliente llamado '{cliente}'."}
+
+    cliente_id = resultado[0]["id"]
+    nombre_real = resultado[0]["nombre"]
+
+    updates = []
+    params = []
+
+    if telefono is not None:
+        updates.append(f"telefono = ${len(params)+1}")
+        params.append(telefono)
+    if direccion is not None:
+        updates.append(f"direccion = ${len(params)+1}")
+        params.append(direccion)
+    if notas is not None:
+        updates.append(f"notas_adicionales = ${len(params)+1}")
+        params.append(notas)
+
+    if not updates:
+        return {"exito": False, "error": "No se proporcionaron datos nuevos para actualizar."}
+
+    params.append(cliente_id)
+    set_clause = ", ".join(updates)
+    await ejecutar_query(
+        f"UPDATE clientes SET {set_clause} WHERE id = ${len(params)}",
+        params
+    )
+
+    return {
+        "exito": True,
+        "mensaje": f"Datos actualizados correctamente para el cliente '{nombre_real}'."
+    }
+
+
 # ==================== DEFINICIÓN DE TOOLS ====================
 
 TOOLS = [
@@ -648,6 +687,24 @@ TOOLS = [
             },
         },
     },
+    # ===== NUEVA HERRAMIENTA: EDITAR CLIENTE =====
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_editar_cliente",
+            "description": "Edita o agrega información (teléfono, dirección, notas) de un cliente existente.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cliente": {"type": "string", "description": "Nombre del cliente a editar"},
+                    "telefono": {"type": "string", "description": "Nuevo número de teléfono (opcional)"},
+                    "direccion": {"type": "string", "description": "Nueva dirección (opcional)"},
+                    "notas": {"type": "string", "description": "Nuevas notas (opcional)"},
+                },
+                "required": ["cliente"],
+            },
+        },
+    },
 ]
 
 TOOL_FUNCTIONS = {
@@ -661,6 +718,7 @@ TOOL_FUNCTIONS = {
     "tool_registrar_gasto": tool_registrar_gasto,
     "tool_consultar_gastos": tool_consultar_gastos,
     "tool_explicar_estado": tool_explicar_estado,
+    "tool_editar_cliente": tool_editar_cliente,  # <-- NUEVA
 }
 
 # ==================== PROMPT DEL SISTEMA (BASE) ====================
@@ -825,7 +883,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Consultar proyectos activos, liquidados, cancelados\n"
         "- Marcar presupuestos como enviados\n"
         "- Registrar gastos generales\n"
-        "- Cancelar o borrar proyectos (con confirmación)\n\n"
+        "- Cancelar o borrar proyectos (con confirmación)\n"
+        "- Editar información de clientes (teléfono, dirección, notas)\n\n"
         "Simplemente hable conmigo en lenguaje natural. ¿En qué le ayudo?"
     )
 
@@ -884,6 +943,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
     app.add_handler(MessageHandler(filters.VOICE, handler))
 
-    logger.info("🤖 Bot asíncrono con asyncpg, poda de historial y persistencia iniciado.")
-    # app.run_polling() es síncrono y maneja su propio loop
+    logger.info("🤖 Bot asíncrono con asyncpg, poda de historial, persistencia y edición de clientes iniciado.")
     app.run_polling()
