@@ -160,7 +160,6 @@ async def crear_tablas():
             enviado BOOLEAN DEFAULT FALSE
         )
         """,
-        # ===== NUEVA TABLA PARA HISTORIAL DE CONVERSACIÓN =====
         """
         CREATE TABLE IF NOT EXISTS historial_chat (
             id SERIAL PRIMARY KEY,
@@ -181,9 +180,8 @@ async def crear_tablas():
             logger.warning(f"⚠️ Error creando tabla (puede que ya exista): {e}")
 
 
-# ==================== HISTORIAL EN POSTGRES (en vez de Pickle) ====================
+# ==================== HISTORIAL EN POSTGRES ====================
 async def guardar_historial(chat_id: int, rol: str, contenido: str):
-    """Guarda un mensaje en el historial de PostgreSQL."""
     query = """
         INSERT INTO historial_chat (chat_id, rol, contenido)
         VALUES ($1, $2, $3)
@@ -192,7 +190,6 @@ async def guardar_historial(chat_id: int, rol: str, contenido: str):
 
 
 async def obtener_historial(chat_id: int, limite: int = 12) -> List[Dict]:
-    """Obtiene los últimos N mensajes del historial de PostgreSQL."""
     query = """
         SELECT rol, contenido
         FROM historial_chat
@@ -201,12 +198,10 @@ async def obtener_historial(chat_id: int, limite: int = 12) -> List[Dict]:
         LIMIT $2
     """
     resultados = await ejecutar_query(query, (chat_id, limite), fetch=True)
-    # Invertir para que queden en orden cronológico
     return [{"role": r["rol"], "content": r["contenido"]} for r in reversed(resultados)]
 
 
 async def limpiar_historial(chat_id: int):
-    """Elimina todo el historial de un chat."""
     await ejecutar_query("DELETE FROM historial_chat WHERE chat_id = $1", (chat_id,))
 
 
@@ -258,18 +253,13 @@ async def obtener_proyectos_activos(cliente_nombre):
     return await ejecutar_query(query, (f"%{cliente_nombre}%",), fetch=True)
 
 
-# ==================== DESAMBIGUACIÓN DE PROYECTOS (CORRECCIÓN CLAVE) ====================
+# ==================== DESAMBIGUACIÓN DE PROYECTOS ====================
 async def _resolver_proyecto_o_pedir(
     cliente: str,
     nombre_corto: Optional[str],
     proyectos: List[Dict],
     accion_descripcion: str = "",
 ) -> Tuple[Optional[Dict], Optional[Dict]]:
-    """
-    Resuelve a qué proyecto se refiere el usuario.
-    Devuelve (proyecto, None) si está claro.
-    Devuelve (None, dict_con_error) si hay que preguntar.
-    """
     if not proyectos:
         return None, {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
 
@@ -283,7 +273,6 @@ async def _resolver_proyecto_o_pedir(
         if len(coincidencias) > 1:
             proyectos = coincidencias
         elif len(coincidencias) == 0:
-            # Buscar por descripción también
             coincidencias = [
                 p for p in proyectos
                 if nombre_corto.lower() in (p["descripcion"] or "").lower()
@@ -301,7 +290,6 @@ async def _resolver_proyecto_o_pedir(
     if len(proyectos) == 1:
         return proyectos[0], None
 
-    # Múltiples proyectos activos: hay que preguntar
     opciones = []
     for p in proyectos:
         nombre = p["nombre_corto"] or "Proyecto"
@@ -321,7 +309,7 @@ async def _resolver_proyecto_o_pedir(
     }
 
 
-# ==================== TOOLS (CORREGIDAS) ====================
+# ==================== TOOLS ====================
 async def tool_registrar_proyecto(
     cliente: str,
     nombre_corto: str,
@@ -348,11 +336,9 @@ async def tool_registrar_pago(cliente: str, monto: float, referencia: str = None
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-
     proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, referencia, proyectos, "registrar pago")
     if aviso:
         return aviso
-
     pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = (
         proyecto["id"],
         proyecto["nombre_corto"],
@@ -389,11 +375,9 @@ async def tool_marcar_presupuesto_enviado(
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-
     proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "marcar presupuesto enviado")
     if aviso:
         return aviso
-
     pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = (
         proyecto["id"],
         proyecto["nombre_corto"],
@@ -431,7 +415,6 @@ async def tool_consultar_proyectos(tipo: str = "activos", cliente: str = None):
     else:
         return {"exito": False, "error": "Tipo de consulta no válido."}
 
-    # Contar total antes de limitar
     if cliente:
         cliente = cliente.lower().strip()
         count_query = f"""
@@ -492,11 +475,9 @@ async def tool_cerrar_proyecto(cliente: str, nombre_corto: str = None):
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-
     proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "cerrar/liquidar proyecto")
     if aviso:
         return aviso
-
     pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = (
         proyecto["id"],
         proyecto["nombre_corto"],
@@ -528,8 +509,6 @@ async def tool_cancelar_proyecto(cliente: str, nombre_corto: str = None):
     proyectos = await ejecutar_query(query, (f"%{cliente}%",), fetch=True)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos para {cliente} que no estén cancelados."}
-
-    # Convertir a lista de diccionarios para _resolver_proyecto_o_pedir
     proyectos_dict = []
     for row in proyectos:
         proyectos_dict.append({
@@ -544,11 +523,9 @@ async def tool_cancelar_proyecto(cliente: str, nombre_corto: str = None):
             "presupuesto_enviado": row["presupuesto_enviado"],
             "cliente": row["cliente"],
         })
-
     proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos_dict, "cancelar proyecto")
     if aviso:
         return aviso
-
     pid = proyecto["id"]
     nc = proyecto["nombre_corto"]
     await ejecutar_query("UPDATE proyectos SET estado = 'Cancelado' WHERE id = $1", (pid,))
@@ -571,7 +548,6 @@ async def tool_borrar_proyecto(cliente: str, nombre_corto: str = None, confirmad
     proyectos = await ejecutar_query(query, (f"%{cliente}%",), fetch=True)
     if not proyectos:
         return {"exito": False, "error": f"No encontré proyectos para {cliente}."}
-
     proyectos_dict = []
     for row in proyectos:
         proyectos_dict.append({
@@ -586,11 +562,9 @@ async def tool_borrar_proyecto(cliente: str, nombre_corto: str = None, confirmad
             "presupuesto_enviado": row["presupuesto_enviado"],
             "cliente": row["cliente"],
         })
-
     proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos_dict, "borrar proyecto")
     if aviso:
         return aviso
-
     pid = proyecto["id"]
     nc = proyecto["nombre_corto"]
     await ejecutar_query("DELETE FROM proyectos WHERE id = $1", (pid,))
@@ -623,11 +597,9 @@ async def tool_explicar_estado(cliente: str, nombre_corto: str = None):
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-
     proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "explicar estado")
     if aviso:
         return aviso
-
     pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = (
         proyecto["id"],
         proyecto["nombre_corto"],
@@ -1078,10 +1050,7 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 
     chat_id = update.effective_chat.id
 
-    # Guardar mensaje del usuario en historial (Postgres)
     await guardar_historial(chat_id, "user", texto)
-
-    # Obtener historial de Postgres
     historial = await obtener_historial(chat_id, 15)
     historial_podado = podar_historial(historial)
 
@@ -1119,14 +1088,12 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
             return
 
         tool_calls = message.tool_calls
-        # Guardar el mensaje del asistente con tool_calls
         await guardar_historial(chat_id, "assistant", json.dumps({"tool_calls": [tc.model_dump() for tc in tool_calls]}))
 
         for tool_call in tool_calls:
             function_name = tool_call.function.name
             function_args = json.loads(tool_call.function.arguments)
 
-            # Inyectar chat_id para herramientas de recordatorios
             if function_name in ["tool_crear_recordatorio", "tool_consultar_recordatorios", "tool_borrar_recordatorio", "tool_editar_recordatorio"]:
                 function_args["chat_id"] = chat_id
 
@@ -1140,10 +1107,8 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                     logger.error(f"Error ejecutando tool {function_name}: {e}")
                     result = {"error": str(e)}
 
-            # Guardar resultado de la tool en historial
             await guardar_historial(chat_id, "tool", json.dumps(result))
 
-            # Si la tool pide selección, mostrar al usuario y esperar su respuesta
             if result.get("requiere_seleccion"):
                 opciones = result.get("opciones", [])
                 mensaje_opciones = f"{result.get('error', '')}\n\n"
@@ -1151,7 +1116,6 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                     mensaje_opciones += f"{i}. {opcion}\n"
                 mensaje_opciones += "\nResponde con el nombre exacto del proyecto o el número."
                 await update.message.reply_text(mensaje_opciones, parse_mode="Markdown")
-                # Guardar estado de que estamos esperando selección
                 context.user_data["esperando_seleccion"] = {
                     "tool_name": function_name,
                     "args_originales": function_args,
@@ -1160,7 +1124,6 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                 }
                 return
 
-        # Recargar historial para la siguiente iteración
         historial = await obtener_historial(chat_id, 15)
         historial_podado = podar_historial(historial)
         mensajes_api = [system_msg] + historial_podado
@@ -1170,7 +1133,6 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 
 # ==================== MANEJO DE RESPUESTA DE SELECCIÓN ====================
 async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
-    """Maneja la respuesta del usuario cuando está eligiendo un proyecto entre varios."""
     seleccion_data = context.user_data.get("esperando_seleccion")
     if not seleccion_data:
         return False
@@ -1179,23 +1141,18 @@ async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     args_originales = seleccion_data["args_originales"]
     opciones = seleccion_data["opciones"]
 
-    # Intentar parsear la respuesta
     seleccionado = None
     texto_limpio = texto.strip().lower()
 
-    # Verificar si es un número
     if texto_limpio.isdigit():
         idx = int(texto_limpio) - 1
         if 0 <= idx < len(opciones):
             seleccionado = opciones[idx]
-            # Extraer el nombre entre comillas
             match = re.search(r"'([^']+)'", seleccionado)
             if match:
                 args_originales["nombre_corto"] = match.group(1)
     else:
-        # Buscar por coincidencia de texto
         for opcion in opciones:
-            # Extraer nombre entre comillas
             match = re.search(r"'([^']+)'", opcion)
             if match:
                 nombre_opcion = match.group(1).lower()
@@ -1212,10 +1169,8 @@ async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
         return True
 
-    # Limpiar el estado de espera
     context.user_data["esperando_seleccion"] = None
 
-    # Ejecutar la herramienta con el nombre_corto añadido
     tool_func = TOOL_FUNCTIONS.get(tool_name)
     if not tool_func:
         await update.message.reply_text("❌ Error: No encontré la herramienta.")
@@ -1223,7 +1178,6 @@ async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     try:
         result = await tool_func(**args_originales)
-        # Guardar resultado en historial
         chat_id = update.effective_chat.id
         await guardar_historial(chat_id, "tool", json.dumps(result))
         if result.get("exito"):
@@ -1260,7 +1214,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    # Verificar si estamos esperando una selección
     if context.user_data.get("esperando_seleccion"):
         if update.message.text:
             await manejar_seleccion(update, context, update.message.text)
@@ -1293,8 +1246,6 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== MOTOR DE ENVÍO DE RECORDATORIOS ====================
 async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
-    """Revisa cada minuto si hay recordatorios pendientes y los envía."""
-    # Guardamos en UTC, comparamos con UTC
     query = """
         SELECT id, chat_id, mensaje, fecha_recordatorio
         FROM recordatorios
@@ -1323,36 +1274,26 @@ async def main():
     await init_db_pool()
     await crear_tablas()
 
-    persistence = PicklePersistence(filepath="bot_data.pickle")
-    app = ApplicationBuilder().token(TOKEN).persistence(persistence).build()
+    # Crear la aplicación
+    app = ApplicationBuilder().token(TOKEN).build()
 
+    # Agregar handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
     app.add_handler(MessageHandler(filters.VOICE, handler))
 
-    # JobQueue no es crítico, ignoramos el warning
-    logger.info("🤖 Bot iniciado. Escuchando mensajes...")
-
-    # Ejecutar polling de forma síncrona (NO await)
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
-    app.add_handler(MessageHandler(filters.VOICE, handler))
-
+    # Configurar JobQueue para recordatorios
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(checar_recordatorios, interval=60, first=10)
         logger.info("✅ JobQueue para recordatorios iniciado (cada 60s).")
     else:
-        logger.warning("⚠️ JobQueue no disponible.")
+        logger.warning("⚠️ JobQueue no disponible. Los recordatorios no se enviarán automáticamente. Instala `pip install python-telegram-bot[job-queue]`")
 
     logger.info("🤖 Bot asíncrono con asyncpg, desambiguación de proyectos, historial en Postgres y correcciones de Claude iniciado.")
-    await app.run_polling()
+
+    # Ejecutar polling de forma síncrona
+    app.run_polling()
 
 
 if __name__ == "__main__":
