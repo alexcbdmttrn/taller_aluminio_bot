@@ -1270,19 +1270,17 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==================== INICIO ====================
-async def main():
-    await init_db_pool()
-    await crear_tablas()
+def main():
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(init_db_pool())
+    loop.run_until_complete(crear_tablas())
 
-    # Crear la aplicación
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Agregar handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
     app.add_handler(MessageHandler(filters.VOICE, handler))
 
-    # Configurar JobQueue para recordatorios
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(checar_recordatorios, interval=60, first=10)
@@ -1291,10 +1289,7 @@ async def main():
         logger.warning("⚠️ JobQueue no disponible. Los recordatorios no se enviarán automáticamente. Instala `pip install python-telegram-bot[job-queue]`")
 
     logger.info("🤖 Bot asíncrono con asyncpg, desambiguación de proyectos, historial en Postgres y correcciones de Claude iniciado.")
-
-    # Ejecutar polling de forma síncrona
     app.run_polling()
 
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
