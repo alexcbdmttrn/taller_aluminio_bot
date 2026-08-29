@@ -119,14 +119,8 @@ async def buscar_o_crear_cliente(nombre_cliente, telefono=None, direccion=None, 
                 params.append(notas)
             if updates:
                 params.append(cliente_id)
-                # Reconstruir la consulta de actualización
-                set_clause = ", ".join(updates)
-                # Ajustar índices de parámetros
-                param_placeholders = []
-                for i, _ in enumerate(params[:-1], 1):
-                    param_placeholders.append(f"${i}")
                 set_clause_final = ", ".join(
-                    [f"{col} = ${i+1}" for i, col in enumerate(updates)]
+                    [f"{col.split(' ')[0]} = ${i+1}" for i, col in enumerate(updates)]
                 )
                 await ejecutar_query(
                     f"UPDATE clientes SET {set_clause_final} WHERE id = ${len(params)}",
@@ -236,10 +230,10 @@ async def tool_marcar_presupuesto_enviado(
     ]
     params = []
     if monto is not None and monto > 0:
-        updates.append("monto_total = $1")
+        updates.append(f"monto_total = ${len(params)+1}")
         params.append(monto)
     if descripcion:
-        updates.append("descripcion = COALESCE($2, descripcion)")
+        updates.append(f"descripcion = COALESCE(${len(params)+1}, descripcion)")
         params.append(descripcion)
     params.append(pid)
     await ejecutar_query(
@@ -343,17 +337,18 @@ async def tool_cerrar_proyecto(cliente: str, nombre_corto: str = None):
         }
 
 
+# ===== FUNCIONES CORREGIDAS (sin filtro de estado) =====
 async def tool_cancelar_proyecto(cliente: str, nombre_corto: str = None):
-    """Cancela un proyecto (cambia estado a Cancelado)."""
+    """Cancela un proyecto (cambia estado a Cancelado). Ahora puede cancelar proyectos en cualquier estado (excepto ya cancelados)."""
     query = """
         SELECT p.id, p.nombre_corto
         FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
-        WHERE unaccent(c.nombre) ILIKE unaccent($1) AND p.estado NOT IN ('Liquidado', 'Cancelado')
+        WHERE unaccent(c.nombre) ILIKE unaccent($1) AND p.estado != 'Cancelado'
         ORDER BY p.fecha_creacion DESC
     """
     proyectos = await ejecutar_query(query, (f"%{cliente}%",), fetch=True)
     if not proyectos:
-        return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
+        return {"exito": False, "error": f"No hay proyectos para {cliente} que no estén cancelados."}
     if nombre_corto:
         for p in proyectos:
             if nombre_corto.lower() in p[1].lower():
@@ -378,21 +373,22 @@ async def tool_cancelar_proyecto(cliente: str, nombre_corto: str = None):
 async def tool_borrar_proyecto(
     cliente: str, nombre_corto: str = None, confirmado: bool = False
 ):
-    """Borra físicamente un proyecto. Solo si confirmado es True."""
+    """Borra físicamente un proyecto. Solo si confirmado es True. Ahora puede borrar proyectos en CUALQUIER estado."""
     if not confirmado:
         return {
             "exito": False,
-            "error": "Se requiere confirmación explícita para borrar. Pregunta al usuario: '¿Estás seguro de borrar el proyecto?'.",
+            "error": "Se requiere confirmación explícita para borrar. Pregunta al usuario: '¿Estás seguro de borrar el proyecto?'. Responde 'SÍ' para confirmar.",
         }
+    # ==== CORRECCIÓN: QUITADO EL FILTRO DE ESTADO ====
     query = """
         SELECT p.id, p.nombre_corto
         FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
-        WHERE unaccent(c.nombre) ILIKE unaccent($1) AND p.estado NOT IN ('Liquidado', 'Cancelado')
+        WHERE unaccent(c.nombre) ILIKE unaccent($1)
         ORDER BY p.fecha_creacion DESC
     """
     proyectos = await ejecutar_query(query, (f"%{cliente}%",), fetch=True)
     if not proyectos:
-        return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
+        return {"exito": False, "error": f"No encontré proyectos para {cliente}."}
     if nombre_corto:
         for p in proyectos:
             if nombre_corto.lower() in p[1].lower():
@@ -494,7 +490,7 @@ async def tool_explicar_estado(cliente: str, nombre_corto: str = None):
 
 
 # ==================== DEFINICIÓN DE TOOLS ====================
-
+# (Misma lista de TOOLS, sin cambios, pero las funciones ya están corregidas)
 TOOLS = [
     {
         "type": "function",
@@ -744,7 +740,6 @@ def podar_historial(messages: List[Dict]) -> List[Dict]:
             start -= 1
             continue
         if msg["role"] == "assistant" and msg.get("tool_calls"):
-            # Verificar si los siguientes mensajes cubren todos los tool_calls
             tool_call_ids = [tc["id"] for tc in msg["tool_calls"]]
             next_msgs = messages[start + 1 : start + len(tool_call_ids) + 1]
             found_ids = [m["tool_call_id"] for m in next_msgs if m["role"] == "tool"]
@@ -798,8 +793,9 @@ async def procesar_mensaje(
     # Agregar mensaje del usuario al historial
     context.user_data["messages"].append({"role": "user", "content": texto})
 
-    # Poda del historial (antes de enviar a la API)
-    historial_podado = podar_historial(context.user_data["messages"])
+    # ===== CORRECCIÓN DE MEMORIA: Podar y asignar de vuelta =====
+    context.user_data["messages"] = podar_historial(context.user_data["messages"])
+    historial_podado = context.user_data["messages"]
 
     # Inyectar mensaje de sistema con fecha/hora actual (dinámico)
     fecha_actual = ahora_cdmx().strftime("%Y-%m-%d %H:%M")
@@ -807,13 +803,11 @@ async def procesar_mensaje(
         "role": "system",
         "content": f"La fecha y hora actual en México es: {fecha_actual}. {SYSTEM_PROMPT_BASE}",
     }
-    # Construir mensajes para la API: system + historial_podado
     mensajes_api = [system_msg] + historial_podado
 
     max_iteraciones = 5
     for _ in range(max_iteraciones):
         try:
-            # Llamada asíncrona a DeepSeek
             response = await deepseek_client.chat.completions.create(
                 model="deepseek-chat",
                 messages=mensajes_api,
@@ -831,7 +825,6 @@ async def procesar_mensaje(
 
         message = response.choices[0].message
 
-        # Si no hay tool calls, responder y terminar
         if not message.tool_calls:
             respuesta = message.content
             if respuesta:
@@ -843,9 +836,7 @@ async def procesar_mensaje(
                 await update.message.reply_text("No tengo respuesta para eso.")
             return
 
-        # Procesar tool calls
         tool_calls = message.tool_calls
-        # Agregar el mensaje del asistente con tool_calls al historial
         context.user_data["messages"].append(message.model_dump())
 
         for tool_call in tool_calls:
@@ -857,13 +848,11 @@ async def procesar_mensaje(
                 result = {"error": f"Tool '{function_name}' no encontrada."}
             else:
                 try:
-                    # Ejecutar la función tool (asíncrona)
                     result = await tool_func(**function_args)
                 except Exception as e:
                     logger.error(f"Error ejecutando tool {function_name}: {e}")
                     result = {"error": str(e)}
 
-            # Agregar el resultado de la tool al historial
             context.user_data["messages"].append(
                 {
                     "role": "tool",
@@ -872,9 +861,9 @@ async def procesar_mensaje(
                 }
             )
 
-        # Después de agregar los mensajes tool, reiniciamos el loop
-        historial_podado = podar_historial(context.user_data["messages"])
-        mensajes_api = [system_msg] + historial_podado
+        # ===== CORRECCIÓN DE MEMORIA: Podar después de cada iteración =====
+        context.user_data["messages"] = podar_historial(context.user_data["messages"])
+        mensajes_api = [system_msg] + context.user_data["messages"]
 
     await update.message.reply_text(
         "El proceso ha tomado demasiados pasos. Por favor, simplifica tu solicitud."
@@ -914,7 +903,6 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             voice_file = await update.message.voice.get_file()
             buffer = io.BytesIO()
             await voice_file.download_to_memory(buffer)
-            # Transcribir en hilo separado (bloqueante)
             texto = await asyncio.to_thread(transcribir_audio_buffer, buffer)
             if not texto:
                 await update.message.reply_text(
@@ -935,13 +923,10 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== INICIO ====================
 async def main():
     """Función principal asíncrona."""
-    # Inicializar pool de base de datos
     await init_db_pool()
 
-    # Configurar persistencia de memoria
     persistence = PicklePersistence(filepath="bot_data.pickle")
 
-    # Crear aplicación con persistencia
     app = (
         ApplicationBuilder()
         .token(TOKEN)
