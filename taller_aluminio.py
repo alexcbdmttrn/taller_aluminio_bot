@@ -337,7 +337,6 @@ async def tool_cerrar_proyecto(cliente: str, nombre_corto: str = None):
         }
 
 
-# ===== FUNCIONES CORREGIDAS (sin filtro de estado) =====
 async def tool_cancelar_proyecto(cliente: str, nombre_corto: str = None):
     """Cancela un proyecto (cambia estado a Cancelado). Ahora puede cancelar proyectos en cualquier estado (excepto ya cancelados)."""
     query = """
@@ -379,7 +378,6 @@ async def tool_borrar_proyecto(
             "exito": False,
             "error": "Se requiere confirmación explícita para borrar. Pregunta al usuario: '¿Estás seguro de borrar el proyecto?'. Responde 'SÍ' para confirmar.",
         }
-    # ==== CORRECCIÓN: QUITADO EL FILTRO DE ESTADO ====
     query = """
         SELECT p.id, p.nombre_corto
         FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
@@ -490,7 +488,7 @@ async def tool_explicar_estado(cliente: str, nombre_corto: str = None):
 
 
 # ==================== DEFINICIÓN DE TOOLS ====================
-# (Misma lista de TOOLS, sin cambios, pero las funciones ya están corregidas)
+
 TOOLS = [
     {
         "type": "function",
@@ -501,24 +499,12 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto",
-                    },
+                    "nombre_corto": {"type": "string", "description": "Nombre corto del proyecto"},
                     "descripcion": {"type": "string", "description": "Descripción del trabajo"},
                     "monto": {"type": "number", "description": "Presupuesto total del proyecto"},
-                    "telefono": {
-                        "type": "string",
-                        "description": "Teléfono del cliente (opcional)",
-                    },
-                    "direccion": {
-                        "type": "string",
-                        "description": "Dirección del cliente (opcional)",
-                    },
-                    "notas": {
-                        "type": "string",
-                        "description": "Notas adicionales (opcional)",
-                    },
+                    "telefono": {"type": "string", "description": "Teléfono del cliente (opcional)"},
+                    "direccion": {"type": "string", "description": "Dirección del cliente (opcional)"},
+                    "notas": {"type": "string", "description": "Notas adicionales (opcional)"},
                 },
                 "required": ["cliente", "nombre_corto", "descripcion", "monto"],
             },
@@ -534,10 +520,7 @@ TOOLS = [
                 "properties": {
                     "cliente": {"type": "string", "description": "Nombre del cliente"},
                     "monto": {"type": "number", "description": "Monto del pago"},
-                    "referencia": {
-                        "type": "string",
-                        "description": "Concepto del pago (opcional)",
-                    },
+                    "referencia": {"type": "string", "description": "Concepto del pago (opcional)"},
                 },
                 "required": ["cliente", "monto"],
             },
@@ -552,18 +535,9 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional si solo tiene uno)",
-                    },
-                    "monto": {
-                        "type": "number",
-                        "description": "Nuevo monto total (opcional)",
-                    },
-                    "descripcion": {
-                        "type": "string",
-                        "description": "Nueva descripción (opcional)",
-                    },
+                    "nombre_corto": {"type": "string", "description": "Nombre corto del proyecto (opcional si solo tiene uno)"},
+                    "monto": {"type": "number", "description": "Nuevo monto total (opcional)"},
+                    "descripcion": {"type": "string", "description": "Nueva descripción (opcional)"},
                 },
                 "required": ["cliente"],
             },
@@ -577,15 +551,8 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "tipo": {
-                        "type": "string",
-                        "enum": ["activos", "liquidados", "cancelados", "deudores"],
-                        "description": "Tipo de consulta",
-                    },
-                    "cliente": {
-                        "type": "string",
-                        "description": "Nombre del cliente (opcional) para filtrar",
-                    },
+                    "tipo": {"type": "string", "enum": ["activos", "liquidados", "cancelados", "deudores"], "description": "Tipo de consulta"},
+                    "cliente": {"type": "string", "description": "Nombre del cliente (opcional) para filtrar"},
                 },
                 "required": [],
             },
@@ -600,10 +567,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional si solo tiene uno)",
-                    },
+                    "nombre_corto": {"type": "string", "description": "Nombre corto del proyecto (opcional si solo tiene uno)"},
                 },
                 "required": ["cliente"],
             },
@@ -618,10 +582,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional si solo tiene uno)",
-                    },
+                    "nombre_corto": {"type": "string", "description": "Nombre corto del proyecto (opcional si solo tiene uno)"},
                 },
                 "required": ["cliente"],
             },
@@ -636,14 +597,8 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional si solo tiene uno)",
-                    },
-                    "confirmado": {
-                        "type": "boolean",
-                        "description": "Debe ser true solo si el usuario confirmó explícitamente con 'sí'",
-                    },
+                    "nombre_corto": {"type": "string", "description": "Nombre corto del proyecto (opcional si solo tiene uno)"},
+                    "confirmado": {"type": "boolean", "description": "Debe ser true solo si el usuario confirmó explícitamente con 'sí'"},
                 },
                 "required": ["cliente", "confirmado"],
             },
@@ -672,10 +627,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limite": {
-                        "type": "integer",
-                        "description": "Número de gastos a mostrar (por defecto 10)",
-                    }
+                    "limite": {"type": "integer", "description": "Número de gastos a mostrar (por defecto 10)"},
                 },
                 "required": [],
             },
@@ -690,10 +642,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional si solo tiene uno)",
-                    },
+                    "nombre_corto": {"type": "string", "description": "Nombre corto del proyecto (opcional si solo tiene uno)"},
                 },
                 "required": ["cliente"],
             },
@@ -733,7 +682,6 @@ def podar_historial(messages: List[Dict]) -> List[Dict]:
         return messages
 
     start = len(messages) - MAX_HISTORIAL
-    # Retroceder mientras el mensaje en start sea 'tool' o un 'assistant' con tool_calls huérfanas
     while start > 0:
         msg = messages[start]
         if msg["role"] == "tool":
@@ -786,18 +734,14 @@ async def procesar_mensaje(
         await update.message.reply_text("No entendí el mensaje. ¿Puedes repetirlo?")
         return
 
-    # Inicializar historial si no existe
     if "messages" not in context.user_data:
         context.user_data["messages"] = []
 
-    # Agregar mensaje del usuario al historial
     context.user_data["messages"].append({"role": "user", "content": texto})
 
-    # ===== CORRECCIÓN DE MEMORIA: Podar y asignar de vuelta =====
     context.user_data["messages"] = podar_historial(context.user_data["messages"])
     historial_podado = context.user_data["messages"]
 
-    # Inyectar mensaje de sistema con fecha/hora actual (dinámico)
     fecha_actual = ahora_cdmx().strftime("%Y-%m-%d %H:%M")
     system_msg = {
         "role": "system",
@@ -861,7 +805,6 @@ async def procesar_mensaje(
                 }
             )
 
-        # ===== CORRECCIÓN DE MEMORIA: Podar después de cada iteración =====
         context.user_data["messages"] = podar_historial(context.user_data["messages"])
         mensajes_api = [system_msg] + context.user_data["messages"]
 
@@ -920,13 +863,16 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
-# ==================== INICIO ====================
-async def main():
-    """Función principal asíncrona."""
-    await init_db_pool()
+# ==================== INICIO CORREGIDO ====================
+if __name__ == "__main__":
+    # Inicializar el pool de base de datos en el loop actual
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(init_db_pool())
 
+    # Configurar persistencia de memoria
     persistence = PicklePersistence(filepath="bot_data.pickle")
 
+    # Crear aplicación con persistencia
     app = (
         ApplicationBuilder()
         .token(TOKEN)
@@ -939,8 +885,5 @@ async def main():
     app.add_handler(MessageHandler(filters.VOICE, handler))
 
     logger.info("🤖 Bot asíncrono con asyncpg, poda de historial y persistencia iniciado.")
-    await app.run_polling()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    # app.run_polling() es síncrono y maneja su propio loop
+    app.run_polling()
