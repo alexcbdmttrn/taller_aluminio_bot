@@ -526,7 +526,7 @@ async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str
     }
 
 
-# ===== NUEVA HERRAMIENTA: RECORDATORIOS INDEPENDIENTES (CORREGIDA ZONA HORARIA) =====
+# ===== HERRAMIENTAS DE RECORDATORIOS (COMPLETAS) =====
 async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id: int):
     """
     Programa un recordatorio personal (alarma) para el usuario.
@@ -534,17 +534,12 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
     Se ajusta automáticamente a UTC para la base de datos.
     """
     try:
-        # Convertir a datetime (la IA genera en hora local de México)
         fecha_local = datetime.strptime(fecha_recordatorio, "%Y-%m-%d %H:%M:%S")
-        
-        # Si la zona horaria está definida, localizar la fecha y convertir a UTC
         if ZONA_HORARIA:
             fecha_localizada = ZONA_HORARIA.localize(fecha_local)
             fecha_utc = fecha_localizada.astimezone(pytz.UTC)
-            # 👇 CORRECCIÓN: Quitar la zona horaria para que PostgreSQL la acepte en TIMESTAMP
-            fecha_utc = fecha_utc.replace(tzinfo=None)
+            fecha_utc = fecha_utc.replace(tzinfo=None)  # 👈 CORRECCIÓN
         else:
-            # Si no hay zona horaria definida, asumir UTC-6 (CDMX sin horario de verano)
             fecha_utc = fecha_local + timedelta(hours=6)
         
         query = """
@@ -554,7 +549,6 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
         """
         await ejecutar_query(query, (chat_id, mensaje, fecha_utc))
         
-        # Mostrar la fecha en hora local para el usuario
         fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
         return {
             "exito": True,
@@ -563,6 +557,63 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
     except Exception as e:
         logger.error(f"Error en tool_crear_recordatorio: {e}")
         return {"exito": False, "error": f"Error al programar recordatorio: {str(e)}"}
+
+
+async def tool_consultar_recordatorios(chat_id: int):
+    """Consulta los recordatorios pendientes del usuario para obtener sus IDs."""
+    query = """
+        SELECT id, mensaje, fecha_recordatorio 
+        FROM recordatorios 
+        WHERE enviado = FALSE AND chat_id = $1 
+        ORDER BY fecha_recordatorio ASC
+    """
+    resultados = await ejecutar_query(query, (chat_id,), fetch=True)
+    if not resultados:
+        return {"exito": True, "mensaje": "No hay recordatorios pendientes en este momento.", "data": []}
+    
+    data = []
+    for r in resultados:
+        # Mostrar en hora local aproximada (restar 6h)
+        fecha_local = r["fecha_recordatorio"] - timedelta(hours=6)
+        data.append({
+            "id_recordatorio": r["id"],
+            "mensaje": r["mensaje"],
+            "fecha_local": fecha_local.strftime("%Y-%m-%d %H:%M:%S")
+        })
+    return {"exito": True, "data": data}
+
+
+async def tool_borrar_recordatorio(id_recordatorio: int):
+    """Borra un recordatorio específico usando su ID."""
+    await ejecutar_query("DELETE FROM recordatorios WHERE id = $1", (id_recordatorio,))
+    return {"exito": True, "mensaje": f"🗑️ Recordatorio con ID {id_recordatorio} eliminado."}
+
+
+async def tool_editar_recordatorio(id_recordatorio: int, nuevo_mensaje: str = None, nueva_fecha: str = None):
+    """Edita el mensaje o la fecha de un recordatorio existente."""
+    updates = []
+    params = []
+    
+    if nuevo_mensaje:
+        updates.append(f"mensaje = ${len(params)+1}")
+        params.append(nuevo_mensaje)
+        
+    if nueva_fecha:
+        fecha_local = datetime.strptime(nueva_fecha, "%Y-%m-%d %H:%M:%S")
+        if ZONA_HORARIA:
+            fecha_utc = ZONA_HORARIA.localize(fecha_local).astimezone(pytz.UTC).replace(tzinfo=None)
+        else:
+            fecha_utc = fecha_local + timedelta(hours=6)
+        updates.append(f"fecha_recordatorio = ${len(params)+1}")
+        params.append(fecha_utc)
+        
+    if not updates:
+        return {"exito": False, "error": "No se enviaron datos para actualizar."}
+        
+    params.append(id_recordatorio)
+    set_clause = ", ".join(updates)
+    await ejecutar_query(f"UPDATE recordatorios SET {set_clause} WHERE id = ${len(params)}", params)
+    return {"exito": True, "mensaje": f"✏️ Recordatorio {id_recordatorio} actualizado correctamente."}
 
 
 # ==================== DEFINICIÓN DE TOOLS ====================
@@ -743,19 +794,61 @@ TOOLS = [
             },
         },
     },
-    # ===== NUEVA HERRAMIENTA: RECORDATORIOS =====
+    # ===== RECORDATORIOS =====
     {
         "type": "function",
         "function": {
             "name": "tool_crear_recordatorio",
-            "description": "Programa un recordatorio personal (alarma) para el usuario. La fecha debe estar en formato YYYY-MM-DD HH:MM:SS (hora de México). No está vinculado a proyectos ni clientes.",
+            "description": "Programa un recordatorio personal (alarma) para el usuario. La fecha debe estar en formato YYYY-MM-DD HH:MM:SS (hora de México).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "mensaje": {"type": "string", "description": "Texto del recordatorio (ej. 'Llamar al proveedor de cristales')"},
+                    "mensaje": {"type": "string", "description": "Texto del recordatorio"},
                     "fecha_recordatorio": {"type": "string", "description": "Fecha y hora exacta en formato YYYY-MM-DD HH:MM:SS (hora de México)"}
                 },
                 "required": ["mensaje", "fecha_recordatorio"]
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_consultar_recordatorios",
+            "description": "Muestra la lista de recordatorios pendientes y sus IDs. Úsalo SIEMPRE ANTES de editar o borrar un recordatorio para encontrar el ID correcto si el usuario no te lo proporciona.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_borrar_recordatorio",
+            "description": "Elimina un recordatorio programado utilizando su ID exacto.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id_recordatorio": {"type": "integer", "description": "El ID numérico del recordatorio a borrar"}
+                },
+                "required": ["id_recordatorio"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_editar_recordatorio",
+            "description": "Cambia el mensaje o la fecha de un recordatorio existente usando su ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id_recordatorio": {"type": "integer", "description": "El ID numérico del recordatorio a editar"},
+                    "nuevo_mensaje": {"type": "string", "description": "El nuevo texto del recordatorio (opcional)"},
+                    "nueva_fecha": {"type": "string", "description": "La nueva fecha en formato YYYY-MM-DD HH:MM:SS (opcional)"}
+                },
+                "required": ["id_recordatorio"],
             },
         },
     },
@@ -773,7 +866,10 @@ TOOL_FUNCTIONS = {
     "tool_consultar_gastos": tool_consultar_gastos,
     "tool_explicar_estado": tool_explicar_estado,
     "tool_editar_cliente": tool_editar_cliente,
-    "tool_crear_recordatorio": tool_crear_recordatorio,  # <-- NUEVA
+    "tool_crear_recordatorio": tool_crear_recordatorio,
+    "tool_consultar_recordatorios": tool_consultar_recordatorios,
+    "tool_borrar_recordatorio": tool_borrar_recordatorio,
+    "tool_editar_recordatorio": tool_editar_recordatorio,
 }
 
 # ==================== PROMPT DEL SISTEMA (BASE) ====================
@@ -785,7 +881,10 @@ SYSTEM_PROMPT_BASE = (
     "Si el usuario te insiste en ejecutar una acción, vuelve a utilizar la herramienta correspondiente, ignorando fallos previos en la base de datos. No te excusas con errores pasados si el usuario te pide explícitamente que lo intentes de nuevo. "
     "Habla de forma directa y clara, usando 'jefe' o 'patrón' ocasionalmente. "
     "Cuando muestres listas, preséntalas de manera ordenada, con emojis para facilitar la lectura. "
-    "Si el usuario pide borrar algo, siempre pregunta confirmación primero, y solo ejecuta la herramienta cuando el usuario confirme explícitamente."
+    "Si el usuario pide borrar algo, siempre pregunta confirmación primero, y solo ejecuta la herramienta cuando el usuario confirme explícitamente. "
+    # ===== REGLAS PARA RECORDATORIOS =====
+    "Si el usuario pide editar o borrar un recordatorio, ejecuta PRIMERO tool_consultar_recordatorios de forma silenciosa para encontrar el ID correcto, y luego ejecuta la herramienta de borrado o edición. "
+    "Si el usuario no especifica qué recordatorio quiere borrar/editar, muéstrale la lista de recordatorios pendientes y pídele que seleccione por ID."
 )
 
 # ==================== FUNCIÓN DE PODA DE HISTORIAL ====================
@@ -901,8 +1000,8 @@ async def procesar_mensaje(
             function_name = tool_call.function.name
             function_args = json.loads(tool_call.function.arguments)
 
-            # Inyectar chat_id para recordatorios
-            if function_name == "tool_crear_recordatorio":
+            # Inyectar chat_id para herramientas de recordatorios
+            if function_name in ["tool_crear_recordatorio", "tool_consultar_recordatorios"]:
                 function_args["chat_id"] = update.effective_chat.id
 
             tool_func = TOOL_FUNCTIONS.get(function_name)
@@ -945,7 +1044,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Registrar gastos generales\n"
         "- Cancelar o borrar proyectos (con confirmación)\n"
         "- Editar información de clientes (teléfono, dirección, notas)\n"
-        "- Programar recordatorios personales (alarmas)\n\n"
+        "- Programar, consultar, editar y borrar recordatorios personales\n\n"
         "Simplemente hable conmigo en lenguaje natural. ¿En qué le ayudo?\n\n"
         "💡 *Nota:* Si en algún momento me confundo o me atoro con algún dato, solo escribe /start para reiniciarme."
     )
@@ -1002,7 +1101,6 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
                 text=mensaje,
                 parse_mode="Markdown"
             )
-            # Marcar como enviado
             await ejecutar_query(
                 "UPDATE recordatorios SET enviado = TRUE WHERE id = $1",
                 (row['id'],)
@@ -1014,7 +1112,7 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== INICIO CORREGIDO ====================
 if __name__ == "__main__":
-    # Inicializar el pool de base de datos en el loop actual
+    # Inicializar el pool de base de datos
     loop = asyncio.get_event_loop()
     loop.run_until_complete(init_db_pool())
 
@@ -1037,11 +1135,10 @@ if __name__ == "__main__":
     # Configurar JobQueue para recordatorios
     job_queue = app.job_queue
     if job_queue:
-        # Ejecutar checar_recordatorios cada 60 segundos
         job_queue.run_repeating(checar_recordatorios, interval=60, first=10)
         logger.info("✅ JobQueue para recordatorios iniciado (cada 60s).")
     else:
         logger.warning("⚠️ JobQueue no disponible. Los recordatorios no se enviarán automáticamente.")
 
-    logger.info("🤖 Bot asíncrono con asyncpg, poda de historial, persistencia, edición de clientes, recordatorios y anti-bucles iniciado.")
+    logger.info("🤖 Bot asíncrono con asyncpg, poda de historial, persistencia, edición de clientes, recordatorios completos y anti-bucles iniciado.")
     app.run_polling()
