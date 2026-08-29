@@ -526,7 +526,7 @@ async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str
     }
 
 
-# ===== HERRAMIENTAS DE RECORDATORIOS (COMPLETAS) =====
+# ===== HERRAMIENTAS DE RECORDATORIOS =====
 async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id: int):
     """
     Programa un recordatorio personal (alarma) para el usuario.
@@ -538,7 +538,7 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
         if ZONA_HORARIA:
             fecha_localizada = ZONA_HORARIA.localize(fecha_local)
             fecha_utc = fecha_localizada.astimezone(pytz.UTC)
-            fecha_utc = fecha_utc.replace(tzinfo=None)  # 👈 CORRECCIÓN
+            fecha_utc = fecha_utc.replace(tzinfo=None)
         else:
             fecha_utc = fecha_local + timedelta(hours=6)
         
@@ -573,7 +573,6 @@ async def tool_consultar_recordatorios(chat_id: int):
     
     data = []
     for r in resultados:
-        # Mostrar en hora local aproximada (restar 6h)
         fecha_local = r["fecha_recordatorio"] - timedelta(hours=6)
         data.append({
             "id_recordatorio": r["id"],
@@ -882,7 +881,6 @@ SYSTEM_PROMPT_BASE = (
     "Habla de forma directa y clara, usando 'jefe' o 'patrón' ocasionalmente. "
     "Cuando muestres listas, preséntalas de manera ordenada, con emojis para facilitar la lectura. "
     "Si el usuario pide borrar algo, siempre pregunta confirmación primero, y solo ejecuta la herramienta cuando el usuario confirme explícitamente. "
-    # ===== REGLAS PARA RECORDATORIOS =====
     "Si el usuario pide editar o borrar un recordatorio, ejecuta PRIMERO tool_consultar_recordatorios de forma silenciosa para encontrar el ID correcto, y luego ejecuta la herramienta de borrado o edición. "
     "Si el usuario no especifica qué recordatorio quiere borrar/editar, muéstrale la lista de recordatorios pendientes y pídele que seleccione por ID."
 )
@@ -1000,7 +998,6 @@ async def procesar_mensaje(
             function_name = tool_call.function.name
             function_args = json.loads(tool_call.function.arguments)
 
-            # Inyectar chat_id para herramientas de recordatorios
             if function_name in ["tool_crear_recordatorio", "tool_consultar_recordatorios"]:
                 function_args["chat_id"] = update.effective_chat.id
 
@@ -1083,13 +1080,14 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
-# ==================== MOTOR DE ENVÍO DE RECORDATORIOS ====================
+# ==================== MOTOR DE ENVÍO DE RECORDATORIOS (CORREGIDO) ====================
 async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
     """Revisa cada minuto si hay recordatorios pendientes y los envía."""
+    # ===== CORRECCIÓN: Usar (NOW() AT TIME ZONE 'UTC') para sincronizar con UTC =====
     query = """
         SELECT id, chat_id, mensaje, fecha_recordatorio
         FROM recordatorios
-        WHERE enviado = FALSE AND fecha_recordatorio <= CURRENT_TIMESTAMP
+        WHERE enviado = FALSE AND fecha_recordatorio <= (NOW() AT TIME ZONE 'UTC')
     """
     pendientes = await ejecutar_query(query, fetch=True)
 
@@ -1110,7 +1108,7 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Error enviando recordatorio {row['id']}: {e}")
 
 
-# ==================== INICIO CORREGIDO ====================
+# ==================== INICIO ====================
 if __name__ == "__main__":
     # Inicializar el pool de base de datos
     loop = asyncio.get_event_loop()
