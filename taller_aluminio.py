@@ -1320,21 +1320,25 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== INICIO ====================
 async def main():
-    """Función principal asíncrona."""
-    # Inicializar pool y crear tablas
     await init_db_pool()
     await crear_tablas()
 
-    # Configurar persistencia de memoria (ya no usamos pickle, usamos Postgres)
-    # Pero mantenemos PicklePersistence por si acaso, aunque ya no se usa realmente
     persistence = PicklePersistence(filepath="bot_data.pickle")
+    app = ApplicationBuilder().token(TOKEN).persistence(persistence).build()
 
-    app = (
-        ApplicationBuilder()
-        .token(TOKEN)
-        .persistence(persistence)
-        .build()
-    )
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
+    app.add_handler(MessageHandler(filters.VOICE, handler))
+
+    # JobQueue no es crítico, ignoramos el warning
+    logger.info("🤖 Bot iniciado. Escuchando mensajes...")
+
+    # Ejecutar polling de forma síncrona (NO await)
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
