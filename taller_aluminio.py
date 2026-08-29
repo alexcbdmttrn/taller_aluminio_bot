@@ -20,6 +20,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
     PicklePersistence,
+    JobQueue,
 )
 
 # ==================== CONFIGURACIÓN ====================
@@ -526,6 +527,34 @@ async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str
     }
 
 
+# ===== NUEVA HERRAMIENTA: CREAR RECORDATORIO =====
+async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, proyecto_id: int = None, chat_id: int = None):
+    """Guarda un recordatorio en la base de datos."""
+    if not chat_id:
+        return {"exito": False, "error": "No tengo un chat_id para enviar el recordatorio."}
+    try:
+        # Convertir la fecha proporcionada por el LLM a objeto datetime
+        fecha_dt = datetime.strptime(fecha_recordatorio, "%Y-%m-%d %H:%M:%S")
+        # Ajustar a zona horaria de México (si es necesario, el LLM ya debería calcular en CDMX)
+        if ZONA_HORARIA:
+            fecha_dt = ZONA_HORARIA.localize(fecha_dt)
+        else:
+            fecha_dt = pytz.utc.localize(fecha_dt)
+
+        query = """
+            INSERT INTO recordatorios (chat_id, proyecto_id, mensaje, fecha_recordatorio, enviado)
+            VALUES ($1, $2, $3, $4, FALSE) RETURNING id
+        """
+        result = await ejecutar_query(query, (chat_id, proyecto_id, mensaje, fecha_dt), fetch=True)
+        return {
+            "exito": True,
+            "mensaje": f"Recordatorio programado exitosamente para el {fecha_recordatorio}."
+        }
+    except Exception as e:
+        logger.error(f"Error creando recordatorio: {e}")
+        return {"exito": False, "error": f"Error al programar: {str(e)}"}
+
+
 # ==================== DEFINICIÓN DE TOOLS ====================
 
 TOOLS = [
@@ -704,6 +733,23 @@ TOOLS = [
             },
         },
     },
+    # ===== NUEVA HERRAMIENTA: RECORDATORIO =====
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_crear_recordatorio",
+            "description": "Programa un recordatorio futuro. Usa la fecha y hora actual del sistema para calcular cuándo debe detonarse.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mensaje": {"type": "string", "description": "La tarea a recordar (ej. 'Marcar al proveedor de cristales')"},
+                    "fecha_recordatorio": {"type": "string", "description": "Fecha y hora exacta, estrictamente en formato YYYY-MM-DD HH:MM:SS, en zona horaria de México (CDMX)"},
+                    "proyecto_id": {"type": "integer", "description": "El ID del proyecto, solo si el recordatorio está relacionado a un proyecto específico."}
+                },
+                "required": ["mensaje", "fecha_recordatorio"],
+            },
+        },
+    },
 ]
 
 TOOL_FUNCTIONS = {
@@ -718,6 +764,7 @@ TOOL_FUNCTIONS = {
     "tool_consultar_gastos": tool_consultar_gastos,
     "tool_explicar_estado": tool_explicar_estado,
     "tool_editar_cliente": tool_editar_cliente,
+    "tool_crear_recordatorio": tool_crear_recordatorio,  # <-- NUEVA
 }
 
 # ==================== PROMPT DEL SISTEMA (BASE) ====================
@@ -726,7 +773,6 @@ SYSTEM_PROMPT_BASE = (
     "Tu tarea es ayudar a registrar datos, consultar materiales y administrar pagos. "
     "No asumas información. Si el usuario te pide registrar un gasto o un pago, pero falta la cantidad, el concepto o el proyecto, PREGÚNTALE en lenguaje natural antes de ejecutar la herramienta. "
     "Solo ejecuta herramientas de base de datos cuando tengas toda la información requerida explícita en la conversación. "
-    # ===== REGLA ANTI-BUCLES (AÑADIDA) =====
     "Si el usuario te insiste en ejecutar una acción, vuelve a utilizar la herramienta correspondiente, ignorando fallos previos en la base de datos. No te excusas con errores pasados si el usuario te pide explícitamente que lo intentes de nuevo. "
     "Habla de forma directa y clara, usando 'jefe' o 'patrón' ocasionalmente. "
     "Cuando muestres listas, preséntalas de manera ordenada, con emojis para facilitar la lectura. "
@@ -793,6 +839,10 @@ async def procesar_mensaje(
         await update.message.reply_text("No entendí el mensaje. ¿Puedes repetirlo?")
         return
 
+    # Asegurar que tengamos el chat_id en el contexto para los recordatorios
+    chat_id = update.effective_chat.id
+    context.user_data["chat_id"] = chat_id
+
     if "messages" not in context.user_data:
         context.user_data["messages"] = []
 
@@ -846,6 +896,10 @@ async def procesar_mensaje(
             function_name = tool_call.function.name
             function_args = json.loads(tool_call.function.arguments)
 
+            # Inyectar chat_id en los argumentos si la función lo necesita
+            if function_name == "tool_crear_recordatorio":
+                function_args["chat_id"] = chat_id
+
             tool_func = TOOL_FUNCTIONS.get(function_name)
             if not tool_func:
                 result = {"error": f"Tool '{function_name}' no encontrada."}
@@ -872,6 +926,32 @@ async def procesar_mensaje(
     )
 
 
+# ==================== MOTOR DE ENVÍO DE RECORDATORIOS ====================
+async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
+    """Revisa la base de datos cada minuto y envía los recordatorios pendientes."""
+    try:
+        query = """
+            SELECT id, chat_id, mensaje, fecha_recordatorio, proyecto_id
+            FROM recordatorios
+            WHERE enviado = FALSE AND fecha_recordatorio <= CURRENT_TIMESTAMP - INTERVAL '6 hours'
+        """
+        pendientes = await ejecutar_query(query, fetch=True)
+
+        for row in pendientes:
+            texto_proyecto = f" (Proyecto #{row['proyecto_id']})" if row['proyecto_id'] else ""
+            mensaje = f"🔔 *RECORDATORIO{texto_proyecto}:* \n{row['mensaje']}"
+
+            try:
+                await context.bot.send_message(chat_id=row['chat_id'], text=mensaje, parse_mode="Markdown")
+                await ejecutar_query("UPDATE recordatorios SET enviado = TRUE WHERE id = $1", (row['id'],))
+                logger.info(f"Recordatorio {row['id']} enviado a {row['chat_id']}")
+            except Exception as e:
+                logger.error(f"Error enviando recordatorio {row['id']}: {e}")
+
+    except Exception as e:
+        logger.error(f"Error en checar_recordatorios: {e}")
+
+
 # ==================== MANEJADORES DE TELEGRAM ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /start: resetea el historial y da la bienvenida."""
@@ -885,9 +965,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Marcar presupuestos como enviados\n"
         "- Registrar gastos generales\n"
         "- Cancelar o borrar proyectos (con confirmación)\n"
-        "- Editar información de clientes (teléfono, dirección, notas)\n\n"
+        "- Editar información de clientes (teléfono, dirección, notas)\n"
+        "- Programar recordatorios (ej: 'Recuérdame mañana a las 10:00 cobrarle a Pedro')\n\n"
         "Simplemente hable conmigo en lenguaje natural. ¿En qué le ayudo?\n\n"
-        # ===== NOTA DEL "BOTÓN DE PÁNICO" (AÑADIDA) =====
         "💡 *Nota:* Si en algún momento me confundo o me atoro con algún dato, solo escribe /start para reiniciarme."
     )
 
@@ -934,7 +1014,7 @@ if __name__ == "__main__":
     # Configurar persistencia de memoria
     persistence = PicklePersistence(filepath="bot_data.pickle")
 
-    # Crear aplicación con persistencia
+    # Crear aplicación con persistencia y JobQueue para recordatorios
     app = (
         ApplicationBuilder()
         .token(TOKEN)
@@ -942,9 +1022,17 @@ if __name__ == "__main__":
         .build()
     )
 
+    # Agregar job para revisar recordatorios cada 60 segundos
+    job_queue = app.job_queue
+    if job_queue:
+        job_queue.run_repeating(checar_recordatorios, interval=60, first=10)
+        logger.info("✅ JobQueue de recordatorios iniciado (cada 60 segundos).")
+    else:
+        logger.warning("⚠️ JobQueue no disponible, los recordatorios no funcionarán.")
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
     app.add_handler(MessageHandler(filters.VOICE, handler))
 
-    logger.info("🤖 Bot asíncrono con asyncpg, poda de historial, persistencia, edición de clientes y anti-bucles iniciado.")
+    logger.info("🤖 Bot asíncrono con asyncpg, poda de historial, persistencia, edición de clientes, recordatorios y anti-bucles iniciado.")
     app.run_polling()
