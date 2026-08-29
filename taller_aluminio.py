@@ -485,7 +485,7 @@ async def tool_explicar_estado(cliente: str, nombre_corto: str = None):
     return {"exito": True, "mensaje": explicacion}
 
 
-# ===== NUEVA HERRAMIENTA: EDITAR CLIENTE =====
+# ===== HERRAMIENTA: EDITAR CLIENTE =====
 async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str = None, notas: str = None):
     """Edita la información de un cliente existente (teléfono, dirección, notas)."""
     query_buscar = "SELECT id, nombre FROM clientes WHERE unaccent(nombre) ILIKE unaccent($1)"
@@ -687,7 +687,6 @@ TOOLS = [
             },
         },
     },
-    # ===== NUEVA HERRAMIENTA: EDITAR CLIENTE =====
     {
         "type": "function",
         "function": {
@@ -718,7 +717,7 @@ TOOL_FUNCTIONS = {
     "tool_registrar_gasto": tool_registrar_gasto,
     "tool_consultar_gastos": tool_consultar_gastos,
     "tool_explicar_estado": tool_explicar_estado,
-    "tool_editar_cliente": tool_editar_cliente,  # <-- NUEVA
+    "tool_editar_cliente": tool_editar_cliente,
 }
 
 # ==================== PROMPT DEL SISTEMA (BASE) ====================
@@ -727,6 +726,8 @@ SYSTEM_PROMPT_BASE = (
     "Tu tarea es ayudar a registrar datos, consultar materiales y administrar pagos. "
     "No asumas información. Si el usuario te pide registrar un gasto o un pago, pero falta la cantidad, el concepto o el proyecto, PREGÚNTALE en lenguaje natural antes de ejecutar la herramienta. "
     "Solo ejecuta herramientas de base de datos cuando tengas toda la información requerida explícita en la conversación. "
+    # ===== REGLA ANTI-BUCLES (AÑADIDA) =====
+    "Si el usuario te insiste en ejecutar una acción, vuelve a utilizar la herramienta correspondiente, ignorando fallos previos en la base de datos. No te excusas con errores pasados si el usuario te pide explícitamente que lo intentes de nuevo. "
     "Habla de forma directa y clara, usando 'jefe' o 'patrón' ocasionalmente. "
     "Cuando muestres listas, preséntalas de manera ordenada, con emojis para facilitar la lectura. "
     "Si el usuario pide borrar algo, siempre pregunta confirmación primero, y solo ejecuta la herramienta cuando el usuario confirme explícitamente."
@@ -885,7 +886,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Registrar gastos generales\n"
         "- Cancelar o borrar proyectos (con confirmación)\n"
         "- Editar información de clientes (teléfono, dirección, notas)\n\n"
-        "Simplemente hable conmigo en lenguaje natural. ¿En qué le ayudo?"
+        "Simplemente hable conmigo en lenguaje natural. ¿En qué le ayudo?\n\n"
+        # ===== NOTA DEL "BOTÓN DE PÁNICO" (AÑADIDA) =====
+        "💡 *Nota:* Si en algún momento me confundo o me atoro con algún dato, solo escribe /start para reiniciarme."
     )
 
 
@@ -943,5 +946,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
     app.add_handler(MessageHandler(filters.VOICE, handler))
 
-    logger.info("🤖 Bot asíncrono con asyncpg, poda de historial, persistencia y edición de clientes iniciado.")
+    logger.info("🤖 Bot asíncrono con asyncpg, poda de historial, persistencia, edición de clientes y anti-bucles iniciado.")
     app.run_polling()
