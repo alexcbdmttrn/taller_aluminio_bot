@@ -175,7 +175,9 @@ async def guardar_historial(chat_id: int, mensaje: dict):
         INSERT INTO historial_chat (chat_id, rol, contenido)
         VALUES ($1, $2, $3)
     """
-    await ejecutar_query(query, (chat_id, mensaje.get("role", "user"), json.dumps(mensaje)))
+    await ejecutar_query(
+        query, (chat_id, mensaje.get("role", "user"), json.dumps(mensaje))
+    )
 
 
 async def obtener_historial(chat_id: int, limite: int = 20) -> List[Dict]:
@@ -205,7 +207,9 @@ async def limpiar_historial(chat_id: int):
 
 
 # ==================== CLIENTES Y PROYECTOS ====================
-async def buscar_o_crear_cliente(nombre_cliente, telefono=None, direccion=None, notas=None):
+async def buscar_o_crear_cliente(
+    nombre_cliente, telefono=None, direccion=None, notas=None
+):
     nombre_cliente = nombre_cliente.lower().strip()
     query = "SELECT id FROM clientes WHERE unaccent(nombre) ILIKE unaccent($1)"
     result = await ejecutar_query(query, (f"%{nombre_cliente}%",), fetch=True)
@@ -225,14 +229,19 @@ async def buscar_o_crear_cliente(nombre_cliente, telefono=None, direccion=None, 
             if updates:
                 params.append(cliente_id)
                 set_clause = ", ".join(updates)
-                await ejecutar_query(f"UPDATE clientes SET {set_clause} WHERE id = ${len(params)}", params)
+                await ejecutar_query(
+                    f"UPDATE clientes SET {set_clause} WHERE id = ${len(params)}",
+                    params,
+                )
         return cliente_id
     else:
         insert = """
             INSERT INTO clientes (nombre, telefono, direccion, notas_adicionales)
             VALUES ($1, $2, $3, $4) RETURNING id
         """
-        result = await ejecutar_query(insert, (nombre_cliente, telefono, direccion, notas), fetch=True)
+        result = await ejecutar_query(
+            insert, (nombre_cliente, telefono, direccion, notas), fetch=True
+        )
         return result[0]["id"]
 
 
@@ -258,19 +267,30 @@ async def _resolver_proyecto_o_pedir(
     if not proyectos:
         return None, {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
     if nombre_corto:
-        coincidencias = [p for p in proyectos if nombre_corto.lower() in (p["nombre_corto"] or "").lower()]
+        coincidencias = [
+            p
+            for p in proyectos
+            if nombre_corto.lower() in (p["nombre_corto"] or "").lower()
+        ]
         if len(coincidencias) == 1:
             return coincidencias[0], None
         if len(coincidencias) > 1:
             proyectos = coincidencias
         elif len(coincidencias) == 0:
-            coincidencias = [p for p in proyectos if nombre_corto.lower() in (p["descripcion"] or "").lower()]
+            coincidencias = [
+                p
+                for p in proyectos
+                if nombre_corto.lower() in (p["descripcion"] or "").lower()
+            ]
             if len(coincidencias) == 1:
                 return coincidencias[0], None
             if len(coincidencias) > 1:
                 proyectos = coincidencias
             else:
-                return None, {"exito": False, "error": f"No encontré proyecto para '{nombre_corto}' en {cliente}."}
+                return None, {
+                    "exito": False,
+                    "error": f"No encontré proyecto para '{nombre_corto}' en {cliente}.",
+                }
     if len(proyectos) == 1:
         return proyectos[0], None
     opciones = []
@@ -304,8 +324,15 @@ async def tool_registrar_proyecto(
         INSERT INTO proyectos (cliente_id, nombre_corto, descripcion, monto_total, monto_pagado, estado, notas_adicionales)
         VALUES ($1, $2, $3, $4, 0, 'Pendiente de cotizar', $5) RETURNING id
     """
-    result = await ejecutar_query(insert, (cliente_id, nombre_corto or "Proyecto General", descripcion, monto, notas), fetch=True)
-    return {"exito": True, "mensaje": f"Proyecto '{nombre_corto}' registrado para {cliente}. ID: {result[0]['id']}"}
+    result = await ejecutar_query(
+        insert,
+        (cliente_id, nombre_corto or "Proyecto General", descripcion, monto, notas),
+        fetch=True,
+    )
+    return {
+        "exito": True,
+        "mensaje": f"Proyecto '{nombre_corto}' registrado para {cliente}. ID: {result[0]['id']}",
+    }
 
 
 async def tool_registrar_pago(cliente: str, monto: float, referencia: str = None):
@@ -314,7 +341,9 @@ async def tool_registrar_pago(cliente: str, monto: float, referencia: str = None
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, referencia, proyectos, "registrar pago")
+    proyecto, aviso = await _resolver_proyecto_o_pedir(
+        cliente, referencia, proyectos, "registrar pago"
+    )
     if aviso:
         return aviso
     pid = proyecto["id"]
@@ -346,13 +375,18 @@ async def tool_marcar_presupuesto_enviado(
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "marcar presupuesto enviado")
+    proyecto, aviso = await _resolver_proyecto_o_pedir(
+        cliente, nombre_corto, proyectos, "marcar presupuesto enviado"
+    )
     if aviso:
         return aviso
     pid = proyecto["id"]
     nc = proyecto["nombre_corto"]
     estado_actual = proyecto["estado"]
-    updates = ["presupuesto_enviado = TRUE", "fecha_presupuesto = CURRENT_TIMESTAMP"]
+    updates = [
+        "presupuesto_enviado = TRUE",
+        "fecha_presupuesto = CURRENT_TIMESTAMP",
+    ]
     params = []
     if estado_actual == "Pendiente de cotizar":
         updates.append("estado = 'Presupuesto enviado'")
@@ -363,8 +397,13 @@ async def tool_marcar_presupuesto_enviado(
         updates.append(f"descripcion = COALESCE(${len(params)+1}, descripcion)")
         params.append(descripcion)
     params.append(pid)
-    await ejecutar_query(f"UPDATE proyectos SET {', '.join(updates)} WHERE id = ${len(params)}", params)
-    return {"exito": True, "mensaje": f"Presupuesto marcado como enviado para '{nc}' de {cliente}."}
+    await ejecutar_query(
+        f"UPDATE proyectos SET {', '.join(updates)} WHERE id = ${len(params)}", params
+    )
+    return {
+        "exito": True,
+        "mensaje": f"Presupuesto marcado como enviado para '{nc}' de {cliente}.",
+    }
 
 
 async def tool_marcar_material_comprado(
@@ -376,7 +415,9 @@ async def tool_marcar_material_comprado(
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "marcar material comprado")
+    proyecto, aviso = await _resolver_proyecto_o_pedir(
+        cliente, nombre_corto, proyectos, "marcar material comprado"
+    )
     if aviso:
         return aviso
     pid = proyecto["id"]
@@ -394,9 +435,13 @@ async def tool_marcar_material_comprado(
         updates.append(f"costo_material = ${len(params)+1}")
         params.append(None)
     params.append(pid)
-    await ejecutar_query(f"UPDATE proyectos SET {', '.join(updates)} WHERE id = ${len(params)}", params)
+    await ejecutar_query(
+        f"UPDATE proyectos SET {', '.join(updates)} WHERE id = ${len(params)}", params
+    )
     estado_texto = "comprado ✅" if comprado else "pendiente ⏳"
-    costo_texto = f" (costo: ${costo_material:.2f})" if (comprado and costo_material) else ""
+    costo_texto = (
+        f" (costo: ${costo_material:.2f})" if (comprado and costo_material) else ""
+    )
     return {
         "exito": True,
         "mensaje": f"Material de '{nc}' de {cliente} marcado como {estado_texto}{costo_texto}.",
@@ -411,13 +456,17 @@ async def tool_consultar_proyectos(tipo: str = "activos", cliente: str = None):
     elif tipo == "cancelados":
         condicion = "p.estado = 'Cancelado'"
     elif tipo == "deudores":
-        condicion = "p.estado IN ('Por cobrar', 'En proceso') AND p.monto_total > p.monto_pagado"
+        condicion = (
+            "p.estado IN ('Por cobrar', 'En proceso') AND p.monto_total > p.monto_pagado"
+        )
     else:
         return {"exito": False, "error": "Tipo de consulta no válido."}
     if cliente:
         cliente = cliente.lower().strip()
         count_query = f"SELECT COUNT(*) FROM proyectos p JOIN clientes c ON p.cliente_id = c.id WHERE unaccent(c.nombre) ILIKE unaccent($1) AND {condicion}"
-        total_count = await ejecutar_query(count_query, (f"%{cliente}%",), fetch=True)
+        total_count = await ejecutar_query(
+            count_query, (f"%{cliente}%",), fetch=True
+        )
         total_real = total_count[0]["count"] if total_count else 0
         query = f"""
             SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
@@ -443,21 +492,29 @@ async def tool_consultar_proyectos(tipo: str = "activos", cliente: str = None):
         return {"exito": True, "mensaje": "No hay proyectos en este estado.", "data": []}
     data = []
     for row in resultados:
-        data.append({
-            "cliente": row["nombre"],
-            "proyecto": row["nombre_corto"] or "General",
-            "descripcion": row["descripcion"],
-            "total": float(row["monto_total"]),
-            "pagado": float(row["monto_pagado"]),
-            "saldo": float(row["monto_total"]) - float(row["monto_pagado"]),
-            "estado": row["estado"],
-            "material_comprado": row["material_comprado"],
-            "costo_material": float(row["costo_material"]) if row["costo_material"] else None,
-            "presupuesto_enviado": row["presupuesto_enviado"],
-            "telefono": row["telefono"],
-            "direccion": row["direccion"],
-        })
-    mensaje = f"Mostrando {len(data)} de {total_real} proyectos." if total_real > len(data) else None
+        data.append(
+            {
+                "cliente": row["nombre"],
+                "proyecto": row["nombre_corto"] or "General",
+                "descripcion": row["descripcion"],
+                "total": float(row["monto_total"]),
+                "pagado": float(row["monto_pagado"]),
+                "saldo": float(row["monto_total"]) - float(row["monto_pagado"]),
+                "estado": row["estado"],
+                "material_comprado": row["material_comprado"],
+                "costo_material": float(row["costo_material"])
+                if row["costo_material"]
+                else None,
+                "presupuesto_enviado": row["presupuesto_enviado"],
+                "telefono": row["telefono"],
+                "direccion": row["direccion"],
+            }
+        )
+    mensaje = (
+        f"Mostrando {len(data)} de {total_real} proyectos."
+        if total_real > len(data)
+        else None
+    )
     return {"exito": True, "data": data, "mensaje": mensaje}
 
 
@@ -465,7 +522,9 @@ async def tool_cerrar_proyecto(cliente: str, nombre_corto: str = None):
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "cerrar/liquidar proyecto")
+    proyecto, aviso = await _resolver_proyecto_o_pedir(
+        cliente, nombre_corto, proyectos, "cerrar/liquidar proyecto"
+    )
     if aviso:
         return aviso
     pid = proyecto["id"]
@@ -474,10 +533,18 @@ async def tool_cerrar_proyecto(cliente: str, nombre_corto: str = None):
     pagado = proyecto["monto_pagado"]
     saldo = total - pagado
     if saldo <= 0:
-        await ejecutar_query("UPDATE proyectos SET estado = 'Liquidado' WHERE id = $1", (pid,))
-        return {"exito": True, "mensaje": f"Proyecto '{nc}' de {cliente} liquidado (saldo $0)."}
+        await ejecutar_query(
+            "UPDATE proyectos SET estado = 'Liquidado' WHERE id = $1", (pid,)
+        )
+        return {
+            "exito": True,
+            "mensaje": f"Proyecto '{nc}' de {cliente} liquidado (saldo $0).",
+        }
     else:
-        return {"exito": False, "error": f"El proyecto '{nc}' tiene saldo pendiente de ${saldo:.2f}. Primero registra el pago restante."}
+        return {
+            "exito": False,
+            "error": f"El proyecto '{nc}' tiene saldo pendiente de ${saldo:.2f}. Primero registra el pago restante.",
+        }
 
 
 async def tool_cancelar_proyecto(cliente: str, nombre_corto: str = None):
@@ -490,20 +557,35 @@ async def tool_cancelar_proyecto(cliente: str, nombre_corto: str = None):
     """
     proyectos_raw = await ejecutar_query(query, (f"%{cliente}%",), fetch=True)
     if not proyectos_raw:
-        return {"exito": False, "error": f"No hay proyectos para {cliente} que no estén cancelados."}
+        return {
+            "exito": False,
+            "error": f"No hay proyectos para {cliente} que no estén cancelados.",
+        }
     proyectos = [dict(row) for row in proyectos_raw]
-    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "cancelar proyecto")
+    proyecto, aviso = await _resolver_proyecto_o_pedir(
+        cliente, nombre_corto, proyectos, "cancelar proyecto"
+    )
     if aviso:
         return aviso
     pid = proyecto["id"]
     nc = proyecto["nombre_corto"]
-    await ejecutar_query("UPDATE proyectos SET estado = 'Cancelado' WHERE id = $1", (pid,))
-    return {"exito": True, "mensaje": f"Proyecto '{nc}' de {cliente} ha sido cancelado."}
+    await ejecutar_query(
+        "UPDATE proyectos SET estado = 'Cancelado' WHERE id = $1", (pid,)
+    )
+    return {
+        "exito": True,
+        "mensaje": f"Proyecto '{nc}' de {cliente} ha sido cancelado.",
+    }
 
 
-async def tool_borrar_proyecto(cliente: str, nombre_corto: str = None, confirmado: bool = False):
+async def tool_borrar_proyecto(
+    cliente: str, nombre_corto: str = None, confirmado: bool = False
+):
     if not confirmado:
-        return {"exito": False, "error": "Se requiere confirmación explícita para borrar. Responde 'SÍ' para confirmar."}
+        return {
+            "exito": False,
+            "error": "Se requiere confirmación explícita para borrar. Responde 'SÍ' para confirmar.",
+        }
     query = """
         SELECT p.id, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
                p.material_comprado, p.costo_material, p.presupuesto_enviado, c.nombre as cliente
@@ -515,31 +597,51 @@ async def tool_borrar_proyecto(cliente: str, nombre_corto: str = None, confirmad
     if not proyectos_raw:
         return {"exito": False, "error": f"No encontré proyectos para {cliente}."}
     proyectos = [dict(row) for row in proyectos_raw]
-    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "borrar proyecto")
+    proyecto, aviso = await _resolver_proyecto_o_pedir(
+        cliente, nombre_corto, proyectos, "borrar proyecto"
+    )
     if aviso:
         return aviso
     pid = proyecto["id"]
     nc = proyecto["nombre_corto"]
     await ejecutar_query("DELETE FROM proyectos WHERE id = $1", (pid,))
-    await ejecutar_query("DELETE FROM clientes WHERE id NOT IN (SELECT DISTINCT cliente_id FROM proyectos WHERE cliente_id IS NOT NULL)")
-    return {"exito": True, "mensaje": f"Proyecto '{nc}' de {cliente} eliminado definitivamente."}
+    await ejecutar_query(
+        "DELETE FROM clientes WHERE id NOT IN (SELECT DISTINCT cliente_id FROM proyectos WHERE cliente_id IS NOT NULL)"
+    )
+    return {
+        "exito": True,
+        "mensaje": f"Proyecto '{nc}' de {cliente} eliminado definitivamente.",
+    }
 
 
 async def tool_registrar_gasto(descripcion: str, monto: float):
     if monto <= 0:
         return {"exito": False, "error": "El monto debe ser mayor a cero."}
-    await ejecutar_query("INSERT INTO gastos (descripcion, monto) VALUES ($1, $2)", (descripcion, monto))
-    return {"exito": True, "mensaje": f"Gasto '{descripcion}' de ${monto:.2f} registrado."}
+    await ejecutar_query(
+        "INSERT INTO gastos (descripcion, monto) VALUES ($1, $2)", (descripcion, monto)
+    )
+    return {
+        "exito": True,
+        "mensaje": f"Gasto '{descripcion}' de ${monto:.2f} registrado.",
+    }
 
 
 async def tool_consultar_gastos(limite: int = 10):
     resultados = await ejecutar_query(
         "SELECT fecha, descripcion, monto FROM gastos ORDER BY fecha DESC LIMIT $1",
-        (limite,), fetch=True
+        (limite,),
+        fetch=True,
     )
     if not resultados:
         return {"exito": True, "data": [], "mensaje": "No hay gastos registrados."}
-    data = [{"fecha": r["fecha"].strftime("%d/%m %H:%M"), "descripcion": r["descripcion"], "monto": float(r["monto"])} for r in resultados]
+    data = [
+        {
+            "fecha": r["fecha"].strftime("%d/%m %H:%M"),
+            "descripcion": r["descripcion"],
+            "monto": float(r["monto"]),
+        }
+        for r in resultados
+    ]
     return {"exito": True, "data": data}
 
 
@@ -547,7 +649,9 @@ async def tool_explicar_estado(cliente: str, nombre_corto: str = None):
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "explicar estado")
+    proyecto, aviso = await _resolver_proyecto_o_pedir(
+        cliente, nombre_corto, proyectos, "explicar estado"
+    )
     if aviso:
         return aviso
     nc = proyecto["nombre_corto"]
@@ -555,7 +659,10 @@ async def tool_explicar_estado(cliente: str, nombre_corto: str = None):
     pagado = proyecto["monto_pagado"]
     estado = proyecto["estado"]
     saldo = total - pagado
-    explicacion = f"Proyecto '{nc}' de {cliente}: Estado '{estado}', Monto total ${total:.2f}, Pagado ${pagado:.2f}, Saldo ${saldo:.2f}."
+    explicacion = (
+        f"Proyecto '{nc}' de {cliente}: Estado '{estado}', "
+        f"Monto total ${total:.2f}, Pagado ${pagado:.2f}, Saldo ${saldo:.2f}."
+    )
     if estado == "Liquidado":
         explicacion += " Está liquidado porque el saldo es cero."
     elif estado == "Por cobrar":
@@ -565,9 +672,13 @@ async def tool_explicar_estado(cliente: str, nombre_corto: str = None):
     return {"exito": True, "mensaje": explicacion}
 
 
-async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str = None, notas: str = None):
+async def tool_editar_cliente(
+    cliente: str, telefono: str = None, direccion: str = None, notas: str = None
+):
     query_buscar = "SELECT id, nombre FROM clientes WHERE unaccent(nombre) ILIKE unaccent($1)"
-    resultado = await ejecutar_query(query_buscar, (f"%{cliente.lower().strip()}%",), fetch=True)
+    resultado = await ejecutar_query(
+        query_buscar, (f"%{cliente.lower().strip()}%",), fetch=True
+    )
     if not resultado:
         return {"exito": False, "error": f"No encontré un cliente llamado '{cliente}'."}
     cliente_id = resultado[0]["id"]
@@ -583,14 +694,24 @@ async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str
         updates.append(f"notas_adicionales = ${len(params)+1}")
         params.append(notas)
     if not updates:
-        return {"exito": False, "error": "No se proporcionaron datos nuevos para actualizar."}
+        return {
+            "exito": False,
+            "error": "No se proporcionaron datos nuevos para actualizar.",
+        }
     params.append(cliente_id)
-    await ejecutar_query(f"UPDATE clientes SET {', '.join(updates)} WHERE id = ${len(params)}", params)
-    return {"exito": True, "mensaje": f"Datos actualizados correctamente para el cliente '{nombre_real}'."}
+    await ejecutar_query(
+        f"UPDATE clientes SET {', '.join(updates)} WHERE id = ${len(params)}", params
+    )
+    return {
+        "exito": True,
+        "mensaje": f"Datos actualizados correctamente para el cliente '{nombre_real}'.",
+    }
 
 
 # ==================== INTERPRETACIÓN DE FECHAS ====================
-def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], Optional[datetime]]:
+def interpretar_fecha(
+    fecha_texto: str,
+) -> Tuple[Optional[str], Optional[str], Optional[datetime]]:
     """Interpreta fechas informales. Devuelve (fecha_normalizada, mensaje_ambiguedad, fecha_local)."""
     fecha_texto = fecha_texto.lower().strip()
     hoy = ahora_cdmx()
@@ -620,16 +741,20 @@ def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], O
         partes = fecha_texto.split(' y ')
         if len(partes) >= 2:
             nums = re.findall(r'\d+', partes[0])
-            if nums: hora = int(nums[-1])
+            if nums:
+                hora = int(nums[-1])
             nums2 = re.findall(r'\d+', partes[1])
-            if nums2: minuto = int(nums2[0])
+            if nums2:
+                minuto = int(nums2[0])
     elif ' con ' in fecha_texto:
         partes = fecha_texto.split(' con ')
         if len(partes) >= 2:
             nums = re.findall(r'\d+', partes[0])
-            if nums: hora = int(nums[-1])
+            if nums:
+                hora = int(nums[-1])
             nums2 = re.findall(r'\d+', partes[1])
-            if nums2: minuto = int(nums2[0])
+            if nums2:
+                minuto = int(nums2[0])
     else:
         hora_match = re.search(r'(\d{1,2})\s*[:.,]\s*(\d{2})', fecha_texto)
         if hora_match:
@@ -648,15 +773,19 @@ def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], O
         return None, "No entendí la hora. Por favor, especifica una hora como '2:30' o '2 y 30'.", None
 
     if es_manana:
-        if hora == 12: hora = 0
+        if hora == 12:
+            hora = 0
     elif es_tarde or es_noche:
-        if hora < 12: hora += 12
+        if hora < 12:
+            hora += 12
     else:
         if hora < 6:
             return None, f"¿Quieres decir {hora:02d}:{minuto:02d} AM o {hora+12:02d}:{minuto:02d} PM?", None
 
-    if hora > 23: hora = 12
-    if minuto > 59: minuto = 0
+    if hora > 23:
+        hora = 12
+    if minuto > 59:
+        minuto = 0
 
     fecha_match = re.search(r'(\d{4}-\d{2}-\d{2})', texto)
     fecha_str = fecha_match.group(1) if fecha_match else fecha_actual
@@ -711,7 +840,6 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
                 VALUES ($1, $2, $3, FALSE) RETURNING id
             """
             result = await ejecutar_query(query, (chat_id, mensaje, fecha_utc), fetch=True)
-            nuevo_id = result[0]["id"]
             fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
             return {"exito": True, "mensaje": f"🔔 Nuevo recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje}*"}
         else:
