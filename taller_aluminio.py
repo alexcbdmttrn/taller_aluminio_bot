@@ -1,15 +1,3 @@
-"""
-Asistente Inteligente - Taller de Aluminio
-===========================================
-
-CORRECCIÓN PUNTUAL APLICAR MANUALMENTE (una sola vez):
-  UPDATE proyectos
-  SET estado = 'Por cobrar'
-  WHERE estado = 'Presupuesto enviado'
-    AND monto_pagado > 0
-    AND cliente_id = (SELECT id FROM clientes WHERE unaccent(nombre) ILIKE unaccent('%Diego Rivera%'));
-"""
-
 import os
 import json
 import re
@@ -31,7 +19,6 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
-    PicklePersistence,
     JobQueue,
 )
 
@@ -90,10 +77,7 @@ async def init_db_pool():
     global _db_pool
     try:
         _db_pool = await asyncpg.create_pool(
-            DATABASE_URL,
-            min_size=1,
-            max_size=20,
-            command_timeout=30,
+            DATABASE_URL, min_size=1, max_size=20, command_timeout=30
         )
         logger.info("✅ Pool de conexiones asyncpg iniciado.")
     except Exception as e:
@@ -191,12 +175,10 @@ async def guardar_historial(chat_id: int, mensaje: dict):
         INSERT INTO historial_chat (chat_id, rol, contenido)
         VALUES ($1, $2, $3)
     """
-    await ejecutar_query(
-        query, (chat_id, mensaje.get("role", "user"), json.dumps(mensaje))
-    )
+    await ejecutar_query(query, (chat_id, mensaje.get("role", "user"), json.dumps(mensaje)))
 
 
-async def obtener_historial(chat_id: int, limite: int = 30) -> List[Dict]:
+async def obtener_historial(chat_id: int, limite: int = 20) -> List[Dict]:
     query = """
         SELECT contenido
         FROM historial_chat
@@ -219,15 +201,11 @@ async def obtener_historial(chat_id: int, limite: int = 30) -> List[Dict]:
 
 
 async def limpiar_historial(chat_id: int):
-    await ejecutar_query(
-        "DELETE FROM historial_chat WHERE chat_id = $1", (chat_id,)
-    )
+    await ejecutar_query("DELETE FROM historial_chat WHERE chat_id = $1", (chat_id,))
 
 
 # ==================== CLIENTES Y PROYECTOS ====================
-async def buscar_o_crear_cliente(
-    nombre_cliente, telefono=None, direccion=None, notas=None
-):
+async def buscar_o_crear_cliente(nombre_cliente, telefono=None, direccion=None, notas=None):
     nombre_cliente = nombre_cliente.lower().strip()
     query = "SELECT id FROM clientes WHERE unaccent(nombre) ILIKE unaccent($1)"
     result = await ejecutar_query(query, (f"%{nombre_cliente}%",), fetch=True)
@@ -247,18 +225,14 @@ async def buscar_o_crear_cliente(
             if updates:
                 params.append(cliente_id)
                 set_clause = ", ".join(updates)
-                await ejecutar_query(
-                    f"UPDATE clientes SET {set_clause} WHERE id = ${len(params)}", params
-                )
+                await ejecutar_query(f"UPDATE clientes SET {set_clause} WHERE id = ${len(params)}", params)
         return cliente_id
     else:
         insert = """
             INSERT INTO clientes (nombre, telefono, direccion, notas_adicionales)
             VALUES ($1, $2, $3, $4) RETURNING id
         """
-        result = await ejecutar_query(
-            insert, (nombre_cliente, telefono, direccion, notas), fetch=True
-        )
+        result = await ejecutar_query(insert, (nombre_cliente, telefono, direccion, notas), fetch=True)
         return result[0]["id"]
 
 
@@ -282,35 +256,21 @@ async def _resolver_proyecto_o_pedir(
     accion_descripcion: str = "",
 ) -> Tuple[Optional[Dict], Optional[Dict]]:
     if not proyectos:
-        return None, {
-            "exito": False,
-            "error": f"No hay proyectos activos para {cliente}.",
-        }
+        return None, {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
     if nombre_corto:
-        coincidencias = [
-            p
-            for p in proyectos
-            if nombre_corto.lower() in (p["nombre_corto"] or "").lower()
-        ]
+        coincidencias = [p for p in proyectos if nombre_corto.lower() in (p["nombre_corto"] or "").lower()]
         if len(coincidencias) == 1:
             return coincidencias[0], None
         if len(coincidencias) > 1:
             proyectos = coincidencias
         elif len(coincidencias) == 0:
-            coincidencias = [
-                p
-                for p in proyectos
-                if nombre_corto.lower() in (p["descripcion"] or "").lower()
-            ]
+            coincidencias = [p for p in proyectos if nombre_corto.lower() in (p["descripcion"] or "").lower()]
             if len(coincidencias) == 1:
                 return coincidencias[0], None
             if len(coincidencias) > 1:
                 proyectos = coincidencias
             else:
-                return None, {
-                    "exito": False,
-                    "error": f"No encontré proyecto para '{nombre_corto}' en {cliente}.",
-                }
+                return None, {"exito": False, "error": f"No encontré proyecto para '{nombre_corto}' en {cliente}."}
     if len(proyectos) == 1:
         return proyectos[0], None
     opciones = []
@@ -325,22 +285,6 @@ async def _resolver_proyecto_o_pedir(
         "opciones": opciones,
         "error": f"{cliente} tiene {len(proyectos)} proyectos activos. Pregunta cuál y vuelve a llamar con 'nombre_corto'.",
     }
-
-
-def _extraer_campos_proyecto(proyecto: Dict) -> Tuple:
-    """Extrae los campos de un proyecto en orden consistente."""
-    return (
-        proyecto["id"],
-        proyecto["nombre_corto"],
-        proyecto["descripcion"],
-        proyecto["monto_total"],
-        proyecto["monto_pagado"],
-        proyecto["estado"],
-        proyecto["material_comprado"],
-        proyecto["costo_material"],
-        proyecto["presupuesto_enviado"],
-        proyecto["cliente"],
-    )
 
 
 # ==================== TOOLS ====================
@@ -360,15 +304,8 @@ async def tool_registrar_proyecto(
         INSERT INTO proyectos (cliente_id, nombre_corto, descripcion, monto_total, monto_pagado, estado, notas_adicionales)
         VALUES ($1, $2, $3, $4, 0, 'Pendiente de cotizar', $5) RETURNING id
     """
-    result = await ejecutar_query(
-        insert,
-        (cliente_id, nombre_corto or "Proyecto General", descripcion, monto, notas),
-        fetch=True,
-    )
-    return {
-        "exito": True,
-        "mensaje": f"Proyecto '{nombre_corto}' registrado para {cliente}. ID: {result[0]['id']}",
-    }
+    result = await ejecutar_query(insert, (cliente_id, nombre_corto or "Proyecto General", descripcion, monto, notas), fetch=True)
+    return {"exito": True, "mensaje": f"Proyecto '{nombre_corto}' registrado para {cliente}. ID: {result[0]['id']}"}
 
 
 async def tool_registrar_pago(cliente: str, monto: float, referencia: str = None):
@@ -377,13 +314,14 @@ async def tool_registrar_pago(cliente: str, monto: float, referencia: str = None
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    proyecto, aviso = await _resolver_proyecto_o_pedir(
-        cliente, referencia, proyectos, "registrar pago"
-    )
+    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, referencia, proyectos, "registrar pago")
     if aviso:
         return aviso
-    pid, nc, desc, total, pagado, estado, *_ = _extraer_campos_proyecto(proyecto)
-
+    pid = proyecto["id"]
+    nc = proyecto["nombre_corto"]
+    total = proyecto["monto_total"]
+    pagado = proyecto["monto_pagado"]
+    estado = proyecto["estado"]
     nuevo_pagado = Decimal(str(pagado)) + Decimal(str(monto))
     saldo = max(Decimal("0"), Decimal(str(total)) - nuevo_pagado)
     nuevo_estado = "Liquidado" if saldo == 0 else "Por cobrar"
@@ -399,12 +337,6 @@ async def tool_registrar_pago(cliente: str, monto: float, referencia: str = None
     }
 
 
-# =====================================================================
-# PATCH: tool_marcar_presupuesto_enviado — ya NO regresa el estado
-# hacia atrás. Solo cambia estado a "Presupuesto enviado" si el proyecto
-# estaba en "Pendiente de cotizar". En cualquier otro estado avanzado
-# (En proceso, Por cobrar) solo marca el flag presupuesto_enviado.
-# =====================================================================
 async def tool_marcar_presupuesto_enviado(
     cliente: str,
     nombre_corto: str = None,
@@ -414,25 +346,16 @@ async def tool_marcar_presupuesto_enviado(
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    proyecto, aviso = await _resolver_proyecto_o_pedir(
-        cliente, nombre_corto, proyectos, "marcar presupuesto enviado"
-    )
+    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "marcar presupuesto enviado")
     if aviso:
         return aviso
-    pid, nc, desc, total, pagado, estado_actual, *_ = _extraer_campos_proyecto(
-        proyecto
-    )
-
-    updates = [
-        "presupuesto_enviado = TRUE",
-        "fecha_presupuesto = CURRENT_TIMESTAMP",
-    ]
+    pid = proyecto["id"]
+    nc = proyecto["nombre_corto"]
+    estado_actual = proyecto["estado"]
+    updates = ["presupuesto_enviado = TRUE", "fecha_presupuesto = CURRENT_TIMESTAMP"]
     params = []
-
-    # Solo avanza el estado si está en el estado inicial
     if estado_actual == "Pendiente de cotizar":
         updates.append("estado = 'Presupuesto enviado'")
-
     if monto is not None and monto > 0:
         updates.append(f"monto_total = ${len(params)+1}")
         params.append(monto)
@@ -440,20 +363,10 @@ async def tool_marcar_presupuesto_enviado(
         updates.append(f"descripcion = COALESCE(${len(params)+1}, descripcion)")
         params.append(descripcion)
     params.append(pid)
-    await ejecutar_query(
-        f"UPDATE proyectos SET {', '.join(updates)} WHERE id = ${len(params)}", params
-    )
-    return {
-        "exito": True,
-        "mensaje": f"Presupuesto marcado como enviado para '{nc}' de {cliente}.",
-    }
+    await ejecutar_query(f"UPDATE proyectos SET {', '.join(updates)} WHERE id = ${len(params)}", params)
+    return {"exito": True, "mensaje": f"Presupuesto marcado como enviado para '{nc}' de {cliente}."}
 
 
-# =====================================================================
-# NUEVA TOOL: tool_marcar_material_comprado
-# Escribe directamente en las columnas material_comprado,
-# costo_material y fecha_compra_material del proyecto.
-# =====================================================================
 async def tool_marcar_material_comprado(
     cliente: str,
     nombre_corto: str = None,
@@ -463,37 +376,27 @@ async def tool_marcar_material_comprado(
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    proyecto, aviso = await _resolver_proyecto_o_pedir(
-        cliente, nombre_corto, proyectos, "marcar material comprado"
-    )
+    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "marcar material comprado")
     if aviso:
         return aviso
-    pid, nc, desc, total, pagado, estado, *_ = _extraer_campos_proyecto(proyecto)
-
+    pid = proyecto["id"]
+    nc = proyecto["nombre_corto"]
     updates = ["material_comprado = $1"]
     params: list = [comprado]
-
     if comprado:
         updates.append("fecha_compra_material = CURRENT_TIMESTAMP")
     else:
         updates.append("fecha_compra_material = NULL")
-
     if costo_material is not None and costo_material > 0:
         updates.append(f"costo_material = ${len(params)+1}")
         params.append(costo_material)
     elif not comprado:
         updates.append(f"costo_material = ${len(params)+1}")
         params.append(None)
-
     params.append(pid)
-    await ejecutar_query(
-        f"UPDATE proyectos SET {', '.join(updates)} WHERE id = ${len(params)}", params
-    )
-
+    await ejecutar_query(f"UPDATE proyectos SET {', '.join(updates)} WHERE id = ${len(params)}", params)
     estado_texto = "comprado ✅" if comprado else "pendiente ⏳"
-    costo_texto = (
-        f" (costo: ${costo_material:.2f})" if (comprado and costo_material) else ""
-    )
+    costo_texto = f" (costo: ${costo_material:.2f})" if (comprado and costo_material) else ""
     return {
         "exito": True,
         "mensaje": f"Material de '{nc}' de {cliente} marcado como {estado_texto}{costo_texto}.",
@@ -508,17 +411,13 @@ async def tool_consultar_proyectos(tipo: str = "activos", cliente: str = None):
     elif tipo == "cancelados":
         condicion = "p.estado = 'Cancelado'"
     elif tipo == "deudores":
-        condicion = (
-            "p.estado IN ('Por cobrar', 'En proceso') AND p.monto_total > p.monto_pagado"
-        )
+        condicion = "p.estado IN ('Por cobrar', 'En proceso') AND p.monto_total > p.monto_pagado"
     else:
         return {"exito": False, "error": "Tipo de consulta no válido."}
     if cliente:
         cliente = cliente.lower().strip()
         count_query = f"SELECT COUNT(*) FROM proyectos p JOIN clientes c ON p.cliente_id = c.id WHERE unaccent(c.nombre) ILIKE unaccent($1) AND {condicion}"
-        total_count = await ejecutar_query(
-            count_query, (f"%{cliente}%",), fetch=True
-        )
+        total_count = await ejecutar_query(count_query, (f"%{cliente}%",), fetch=True)
         total_real = total_count[0]["count"] if total_count else 0
         query = f"""
             SELECT c.nombre, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
@@ -537,36 +436,28 @@ async def tool_consultar_proyectos(tipo: str = "activos", cliente: str = None):
                    p.material_comprado, p.costo_material, p.presupuesto_enviado, c.telefono, c.direccion
             FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
             WHERE {condicion}
-            ORDER BY c.nome, p.fecha_creacion DESC LIMIT 5
+            ORDER BY c.nombre, p.fecha_creacion DESC LIMIT 5
         """
         resultados = await ejecutar_query(query, fetch=True)
     if not resultados:
         return {"exito": True, "mensaje": "No hay proyectos en este estado.", "data": []}
     data = []
     for row in resultados:
-        data.append(
-            {
-                "cliente": row["nombre"],
-                "proyecto": row["nombre_corto"] or "General",
-                "descripcion": row["descripcion"],
-                "total": float(row["monto_total"]),
-                "pagado": float(row["monto_pagado"]),
-                "saldo": float(row["monto_total"]) - float(row["monto_pagado"]),
-                "estado": row["estado"],
-                "material_comprado": row["material_comprado"],
-                "costo_material": float(row["costo_material"])
-                if row["costo_material"]
-                else None,
-                "presupuesto_enviado": row["presupuesto_enviado"],
-                "telefono": row["telefono"],
-                "direccion": row["direccion"],
-            }
-        )
-    mensaje = (
-        f"Mostrando {len(data)} de {total_real} proyectos."
-        if total_real > len(data)
-        else None
-    )
+        data.append({
+            "cliente": row["nombre"],
+            "proyecto": row["nombre_corto"] or "General",
+            "descripcion": row["descripcion"],
+            "total": float(row["monto_total"]),
+            "pagado": float(row["monto_pagado"]),
+            "saldo": float(row["monto_total"]) - float(row["monto_pagado"]),
+            "estado": row["estado"],
+            "material_comprado": row["material_comprado"],
+            "costo_material": float(row["costo_material"]) if row["costo_material"] else None,
+            "presupuesto_enviado": row["presupuesto_enviado"],
+            "telefono": row["telefono"],
+            "direccion": row["direccion"],
+        })
+    mensaje = f"Mostrando {len(data)} de {total_real} proyectos." if total_real > len(data) else None
     return {"exito": True, "data": data, "mensaje": mensaje}
 
 
@@ -574,26 +465,19 @@ async def tool_cerrar_proyecto(cliente: str, nombre_corto: str = None):
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    proyecto, aviso = await _resolver_proyecto_o_pedir(
-        cliente, nombre_corto, proyectos, "cerrar/liquidar proyecto"
-    )
+    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "cerrar/liquidar proyecto")
     if aviso:
         return aviso
-    pid, nc, desc, total, pagado, estado, *_ = _extraer_campos_proyecto(proyecto)
+    pid = proyecto["id"]
+    nc = proyecto["nombre_corto"]
+    total = proyecto["monto_total"]
+    pagado = proyecto["monto_pagado"]
     saldo = total - pagado
     if saldo <= 0:
-        await ejecutar_query(
-            "UPDATE proyectos SET estado = 'Liquidado' WHERE id = $1", (pid,)
-        )
-        return {
-            "exito": True,
-            "mensaje": f"Proyecto '{nc}' de {cliente} liquidado (saldo $0).",
-        }
+        await ejecutar_query("UPDATE proyectos SET estado = 'Liquidado' WHERE id = $1", (pid,))
+        return {"exito": True, "mensaje": f"Proyecto '{nc}' de {cliente} liquidado (saldo $0)."}
     else:
-        return {
-            "exito": False,
-            "error": f"El proyecto '{nc}' tiene saldo pendiente de ${saldo:.2f}. Primero registra el pago restante.",
-        }
+        return {"exito": False, "error": f"El proyecto '{nc}' tiene saldo pendiente de ${saldo:.2f}. Primero registra el pago restante."}
 
 
 async def tool_cancelar_proyecto(cliente: str, nombre_corto: str = None):
@@ -604,39 +488,22 @@ async def tool_cancelar_proyecto(cliente: str, nombre_corto: str = None):
         WHERE unaccent(c.nombre) ILIKE unaccent($1) AND p.estado != 'Cancelado'
         ORDER BY p.fecha_creacion DESC
     """
-    proyectos_raw = await ejecutar_query(
-        query, (f"%{cliente}%",), fetch=True
-    )
+    proyectos_raw = await ejecutar_query(query, (f"%{cliente}%",), fetch=True)
     if not proyectos_raw:
-        return {
-            "exito": False,
-            "error": f"No hay proyectos para {cliente} que no estén cancelados.",
-        }
+        return {"exito": False, "error": f"No hay proyectos para {cliente} que no estén cancelados."}
     proyectos = [dict(row) for row in proyectos_raw]
-    proyecto, aviso = await _resolver_proyecto_o_pedir(
-        cliente, nombre_corto, proyectos, "cancelar proyecto"
-    )
+    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "cancelar proyecto")
     if aviso:
         return aviso
     pid = proyecto["id"]
     nc = proyecto["nombre_corto"]
-    await ejecutar_query(
-        "UPDATE proyectos SET estado = 'Cancelado' WHERE id = $1", (pid,)
-    )
-    return {
-        "exito": True,
-        "mensaje": f"Proyecto '{nc}' de {cliente} ha sido cancelado.",
-    }
+    await ejecutar_query("UPDATE proyectos SET estado = 'Cancelado' WHERE id = $1", (pid,))
+    return {"exito": True, "mensaje": f"Proyecto '{nc}' de {cliente} ha sido cancelado."}
 
 
-async def tool_borrar_proyecto(
-    cliente: str, nombre_corto: str = None, confirmado: bool = False
-):
+async def tool_borrar_proyecto(cliente: str, nombre_corto: str = None, confirmado: bool = False):
     if not confirmado:
-        return {
-            "exito": False,
-            "error": "Se requiere confirmación explícita para borrar. Responde 'SÍ' para confirmar.",
-        }
+        return {"exito": False, "error": "Se requiere confirmación explícita para borrar. Responde 'SÍ' para confirmar."}
     query = """
         SELECT p.id, p.nombre_corto, p.descripcion, p.monto_total, p.monto_pagado, p.estado,
                p.material_comprado, p.costo_material, p.presupuesto_enviado, c.nombre as cliente
@@ -644,57 +511,35 @@ async def tool_borrar_proyecto(
         WHERE unaccent(c.nombre) ILIKE unaccent($1)
         ORDER BY p.fecha_creacion DESC
     """
-    proyectos_raw = await ejecutar_query(
-        query, (f"%{cliente}%",), fetch=True
-    )
+    proyectos_raw = await ejecutar_query(query, (f"%{cliente}%",), fetch=True)
     if not proyectos_raw:
         return {"exito": False, "error": f"No encontré proyectos para {cliente}."}
     proyectos = [dict(row) for row in proyectos_raw]
-    proyecto, aviso = await _resolver_proyecto_o_pedir(
-        cliente, nombre_corto, proyectos, "borrar proyecto"
-    )
+    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "borrar proyecto")
     if aviso:
         return aviso
     pid = proyecto["id"]
     nc = proyecto["nombre_corto"]
     await ejecutar_query("DELETE FROM proyectos WHERE id = $1", (pid,))
-    await ejecutar_query(
-        "DELETE FROM clientes WHERE id NOT IN (SELECT DISTINCT cliente_id FROM proyectos WHERE cliente_id IS NOT NULL)"
-    )
-    return {
-        "exito": True,
-        "mensaje": f"Proyecto '{nc}' de {cliente} eliminado definitivamente.",
-    }
+    await ejecutar_query("DELETE FROM clientes WHERE id NOT IN (SELECT DISTINCT cliente_id FROM proyectos WHERE cliente_id IS NOT NULL)")
+    return {"exito": True, "mensaje": f"Proyecto '{nc}' de {cliente} eliminado definitivamente."}
 
 
 async def tool_registrar_gasto(descripcion: str, monto: float):
     if monto <= 0:
         return {"exito": False, "error": "El monto debe ser mayor a cero."}
-    await ejecutar_query(
-        "INSERT INTO gastos (descripcion, monto) VALUES ($1, $2)", (descripcion, monto)
-    )
-    return {
-        "exito": True,
-        "mensaje": f"Gasto '{descripcion}' de ${monto:.2f} registrado.",
-    }
+    await ejecutar_query("INSERT INTO gastos (descripcion, monto) VALUES ($1, $2)", (descripcion, monto))
+    return {"exito": True, "mensaje": f"Gasto '{descripcion}' de ${monto:.2f} registrado."}
 
 
 async def tool_consultar_gastos(limite: int = 10):
     resultados = await ejecutar_query(
         "SELECT fecha, descripcion, monto FROM gastos ORDER BY fecha DESC LIMIT $1",
-        (limite,),
-        fetch=True,
+        (limite,), fetch=True
     )
     if not resultados:
         return {"exito": True, "data": [], "mensaje": "No hay gastos registrados."}
-    data = [
-        {
-            "fecha": r["fecha"].strftime("%d/%m %H:%M"),
-            "descripcion": r["descripcion"],
-            "monto": float(r["monto"]),
-        }
-        for r in resultados
-    ]
+    data = [{"fecha": r["fecha"].strftime("%d/%m %H:%M"), "descripcion": r["descripcion"], "monto": float(r["monto"])} for r in resultados]
     return {"exito": True, "data": data}
 
 
@@ -702,19 +547,15 @@ async def tool_explicar_estado(cliente: str, nombre_corto: str = None):
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
-    proyecto, aviso = await _resolver_proyecto_o_pedir(
-        cliente, nombre_corto, proyectos, "explicar estado"
-    )
+    proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "explicar estado")
     if aviso:
         return aviso
-    pid, nc, desc, total, pagado, estado, mat_comp, costo_mat, presup, cliente_nombre = (
-        _extraer_campos_proyecto(proyecto)
-    )
+    nc = proyecto["nombre_corto"]
+    total = proyecto["monto_total"]
+    pagado = proyecto["monto_pagado"]
+    estado = proyecto["estado"]
     saldo = total - pagado
-    explicacion = (
-        f"Proyecto '{nc}' de {cliente}: Estado '{estado}', "
-        f"Monto total ${total:.2f}, Pagado ${pagado:.2f}, Saldo ${saldo:.2f}."
-    )
+    explicacion = f"Proyecto '{nc}' de {cliente}: Estado '{estado}', Monto total ${total:.2f}, Pagado ${pagado:.2f}, Saldo ${saldo:.2f}."
     if estado == "Liquidado":
         explicacion += " Está liquidado porque el saldo es cero."
     elif estado == "Por cobrar":
@@ -724,13 +565,9 @@ async def tool_explicar_estado(cliente: str, nombre_corto: str = None):
     return {"exito": True, "mensaje": explicacion}
 
 
-async def tool_editar_cliente(
-    cliente: str, telefono: str = None, direccion: str = None, notas: str = None
-):
+async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str = None, notas: str = None):
     query_buscar = "SELECT id, nombre FROM clientes WHERE unaccent(nombre) ILIKE unaccent($1)"
-    resultado = await ejecutar_query(
-        query_buscar, (f"%{cliente.lower().strip()}%",), fetch=True
-    )
+    resultado = await ejecutar_query(query_buscar, (f"%{cliente.lower().strip()}%",), fetch=True)
     if not resultado:
         return {"exito": False, "error": f"No encontré un cliente llamado '{cliente}'."}
     cliente_id = resultado[0]["id"]
@@ -746,210 +583,155 @@ async def tool_editar_cliente(
         updates.append(f"notas_adicionales = ${len(params)+1}")
         params.append(notas)
     if not updates:
-        return {
-            "exito": False,
-            "error": "No se proporcionaron datos nuevos para actualizar.",
-        }
+        return {"exito": False, "error": "No se proporcionaron datos nuevos para actualizar."}
     params.append(cliente_id)
-    await ejecutar_query(
-        f"UPDATE clientes SET {', '.join(updates)} WHERE id = ${len(params)}", params
-    )
-    return {
-        "exito": True,
-        "mensaje": f"Datos actualizados correctamente para el cliente '{nombre_real}'.",
-    }
+    await ejecutar_query(f"UPDATE clientes SET {', '.join(updates)} WHERE id = ${len(params)}", params)
+    return {"exito": True, "mensaje": f"Datos actualizados correctamente para el cliente '{nombre_real}'."}
 
 
-# ==================== RECORDATORIOS ====================
-def _normalizar_texto_hora(texto: str) -> str:
-    texto = texto.lower().strip()
-    reemplazos = {
-        "a.m.": "am",
-        "p.m.": "pm",
-        "a. m.": "am",
-        "p. m.": "pm",
-        "a m": "am",
-        "p m": "pm",
-        "mediodia": "mediodía",
-        "medianoche": "00:00",
-    }
-    for a, b in reemplazos.items():
-        texto = texto.replace(a, b)
-    return texto
-
-
-def interpretar_fecha(
-    fecha_texto: str,
-) -> Tuple[Optional[str], Optional[str], Optional[datetime]]:
-    original = fecha_texto or ""
-    texto = _normalizar_texto_hora(original)
+# ==================== INTERPRETACIÓN DE FECHAS ====================
+def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], Optional[datetime]]:
+    """Interpreta fechas informales. Devuelve (fecha_normalizada, mensaje_ambiguedad, fecha_local)."""
+    fecha_texto = fecha_texto.lower().strip()
     hoy = ahora_cdmx()
     fecha_actual = hoy.strftime("%Y-%m-%d")
+    fecha_manana_dt = hoy + timedelta(days=1)
+    fecha_manana = fecha_manana_dt.strftime("%Y-%m-%d")
 
-    if re.search(r"\bpasado mañana\b", texto):
-        fecha_base = hoy + timedelta(days=2)
-    elif re.search(r"\bmañana\b|\bmanana\b", texto):
-        fecha_base = hoy + timedelta(days=1)
+    texto = fecha_texto.replace("hoy", fecha_actual).replace("mañana", fecha_manana)
+    texto = re.sub(r'\ba\s*(?:las|la)\s*', '', texto)
+    texto = re.sub(r'\bcon\b', '', texto)
+    texto = re.sub(r'\bminutos?\b', '', texto)
+    texto = re.sub(r'\bpara\b', '', texto)
+
+    numeros = re.findall(r'\d+', texto)
+    if not numeros:
+        return None, "No encontré una hora. Por favor, especifica la hora (ej. '2:30 AM').", None
+
+    es_manana = 'mañana' in fecha_texto or 'madrugada' in fecha_texto or 'am' in fecha_texto
+    es_tarde = 'tarde' in fecha_texto or 'pm' in fecha_texto
+    es_noche = 'noche' in fecha_texto
+
+    hora = None
+    minuto = 0
+    segundo = 0
+
+    if ' y ' in fecha_texto:
+        partes = fecha_texto.split(' y ')
+        if len(partes) >= 2:
+            nums = re.findall(r'\d+', partes[0])
+            if nums: hora = int(nums[-1])
+            nums2 = re.findall(r'\d+', partes[1])
+            if nums2: minuto = int(nums2[0])
+    elif ' con ' in fecha_texto:
+        partes = fecha_texto.split(' con ')
+        if len(partes) >= 2:
+            nums = re.findall(r'\d+', partes[0])
+            if nums: hora = int(nums[-1])
+            nums2 = re.findall(r'\d+', partes[1])
+            if nums2: minuto = int(nums2[0])
     else:
-        fecha_base = hoy
-
-    fecha_str = fecha_actual
-    m_iso = re.search(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", texto)
-    m_lat = re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b", texto)
-    try:
-        if m_iso:
-            y, mo, d = map(int, m_iso.groups())
-            fecha_base = hoy.replace(year=y, month=mo, day=d)
-            fecha_str = fecha_base.strftime("%Y-%m-%d")
-        elif m_lat:
-            d, mo, y = map(int, m_lat.groups())
-            fecha_base = hoy.replace(year=y, month=mo, day=d)
-            fecha_str = fecha_base.strftime("%Y-%m-%d")
+        hora_match = re.search(r'(\d{1,2})\s*[:.,]\s*(\d{2})', fecha_texto)
+        if hora_match:
+            hora = int(hora_match.group(1))
+            minuto = int(hora_match.group(2))
         else:
-            fecha_str = fecha_base.strftime("%Y-%m-%d")
-    except ValueError:
-        return None, "La fecha indicada no es válida. Usa, por ejemplo, 30/08/2026.", None
-
-    tiene_am = bool(re.search(r"\b(?:am|a\.m\.)\b", texto))
-    tiene_pm = bool(re.search(r"\b(?:pm|p\.m\.)\b", texto))
-    es_madrugada = bool(re.search(r"\b(?:madrugada)\b", texto))
-    es_manana = bool(re.search(r"\b(?:mañana|manana)\b", texto))
-    es_tarde = bool(re.search(r"\b(?:tarde)\b", texto))
-    es_noche = bool(re.search(r"\b(?:noche)\b", texto))
-    contexto_inequivoco = (
-        tiene_am or tiene_pm or es_madrugada or es_manana or es_tarde or es_noche
-    )
-
-    hora = minuto = None
-    patrones = [
-        r"\b(\d{1,2})\s*[:.,]\s*(\d{1,2})\b",
-        r"\b(\d{1,2})\s+(?:y|con)\s+(\d{1,2})\b",
-        r"\b(\d{1,2})\s+(?:y\s+)?media\b",
-    ]
-    for patron in patrones:
-        m = re.search(patron, texto)
-        if m:
-            hora = int(m.group(1))
-            minuto = 30 if len(m.groups()) == 1 else int(m.group(2))
-            break
+            nums = re.findall(r'\d+', fecha_texto)
+            if len(nums) >= 2:
+                hora = int(nums[-2])
+                minuto = int(nums[-1])
+            elif len(nums) == 1:
+                hora = int(nums[0])
+                minuto = 0
 
     if hora is None:
-        m = re.search(r"\b(\d{1,2})\s+(\d{2})\b", texto)
-        if m:
-            hora, minuto = int(m.group(1)), int(m.group(2))
-        else:
-            m = re.search(r"\b(?:a\s+las|a\s+la|las|la)\s+(\d{1,2})\b", texto)
-            if m:
-                hora, minuto = int(m.group(1)), 0
-            else:
-                nums = re.findall(r"\b\d{1,2}\b", texto)
-                if nums:
-                    candidato = int(nums[0])
-                    if 0 <= candidato <= 23:
-                        hora, minuto = candidato, 0
+        return None, "No entendí la hora. Por favor, especifica una hora como '2:30' o '2 y 30'.", None
 
-    if hora is None:
-        return (
-            None,
-            "No encontré una hora. Por favor, dime la hora, por ejemplo: '3:30 AM'.",
-            None,
-        )
-    if minuto is None:
-        minuto = 0
-    if hora > 23 or minuto > 59:
-        return (
-            None,
-            "La hora indicada no es válida. Usa una hora entre 00:00 y 23:59.",
-            None,
-        )
-
-    if tiene_am:
-        if hora == 12:
-            hora = 0
-    elif tiene_pm:
-        if hora < 12:
-            hora += 12
-    elif es_madrugada:
-        if hora == 12:
-            hora = 0
-        elif hora >= 6:
-            return (
-                None,
-                "Para esa hora necesito saber si es de la mañana o de la tarde.",
-                None,
-            )
-    elif es_manana:
-        if hora == 12:
-            hora = 0
+    if es_manana:
+        if hora == 12: hora = 0
     elif es_tarde or es_noche:
-        if hora < 12:
-            hora += 12
+        if hora < 12: hora += 12
     else:
-        if 6 <= hora <= 11:
-            pass
-        elif hora == 12:
-            pass
-        elif 0 <= hora <= 5:
-            pass
+        if hora < 6:
+            return None, f"¿Quieres decir {hora:02d}:{minuto:02d} AM o {hora+12:02d}:{minuto:02d} PM?", None
 
-    fecha_normalizada = f"{fecha_str} {hora:02d}:{minuto:02d}:00"
+    if hora > 23: hora = 12
+    if minuto > 59: minuto = 0
+
+    fecha_match = re.search(r'(\d{4}-\d{2}-\d{2})', texto)
+    fecha_str = fecha_match.group(1) if fecha_match else fecha_actual
+    fecha_normalizada = f"{fecha_str} {hora:02d}:{minuto:02d}:{segundo:02d}"
+
     try:
         fecha_local = datetime.strptime(fecha_normalizada, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None, "Formato de fecha inválido.", None
+
     return fecha_normalizada, None, fecha_local
 
 
-async def tool_crear_recordatorio(
-    mensaje: str, fecha_recordatorio: str, chat_id: int
-):
+async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id: int):
     try:
-        fecha_normalizada, ambiguedad, fecha_local = interpretar_fecha(
-            fecha_recordatorio
-        )
-        if not fecha_normalizada or not fecha_local:
-            return {
-                "exito": False,
-                "error": ambiguedad
-                or f"⚠️ No pude interpretar la fecha: '{fecha_recordatorio}'.",
-            }
+        fecha_normalizada, ambiguedad, fecha_local = interpretar_fecha(fecha_recordatorio)
+        if not fecha_normalizada:
+            if ambiguedad:
+                return {
+                    "exito": False,
+                    "requiere_aclaracion_fecha": True,
+                    "error": ambiguedad,
+                    "mensaje_original": mensaje,
+                    "fecha_ambigua": fecha_recordatorio,
+                }
+            return {"exito": False, "error": f"⚠️ No pude interpretar la fecha: '{fecha_recordatorio}'."}
 
+        logger.info(f"📥 Fecha recibida: '{fecha_recordatorio}' -> interpretada: '{fecha_normalizada}'")
         fecha_utc = local_a_utc(fecha_local)
         ahora_utc = datetime.utcnow()
         diferencia = (fecha_utc - ahora_utc).total_seconds()
-        fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
 
-        if diferencia <= 0:
+        if diferencia < -120:
+            fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
             fecha_manana = fecha_local + timedelta(days=1)
             fecha_manana_str = fecha_manana.strftime("%d/%m/%Y %I:%M %p")
-            aviso = (
-                f"⚠️ La fecha programada ({fecha_mostrar}) ya pasó. "
-                f"¿Quieres programarla para mañana ({fecha_manana_str}) o mantener la fecha actual?"
-            )
-        elif diferencia <= 180:
-            hora_actual = ahora_cdmx().strftime("%I:%M %p")
-            aviso = (
-                f"⚠️ La fecha programada ({fecha_mostrar}) es muy cercana. "
-                f"La hora actual es {hora_actual}. ¿Quieres programarla igualmente?"
-            )
-        else:
-            aviso = f"Confirma el recordatorio para el {fecha_mostrar}."
-
-        return {
-            "exito": False,
-            "requiere_confirmacion": True,
-            "fecha_local": fecha_mostrar,
-            "mensaje": mensaje,
-            "error": aviso,
-            "datos_originales": {
+            return {
+                "exito": False,
+                "requiere_confirmacion": True,
+                "fecha_local": fecha_mostrar,
                 "mensaje": mensaje,
-                "fecha_local": fecha_local.isoformat(),
-                "fecha_utc": fecha_utc.isoformat(),
-            },
-        }
+                "error": f"⚠️ La fecha programada ({fecha_mostrar}) ya pasó. ¿Quieres programarlo para mañana ({fecha_manana_str}) o confirmas la fecha actual?",
+                "datos_originales": {
+                    "mensaje": mensaje,
+                    "fecha_local": fecha_local.isoformat(),
+                    "fecha_utc": fecha_utc.isoformat()
+                }
+            }
+        elif diferencia > 180:
+            query = """
+                INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado)
+                VALUES ($1, $2, $3, FALSE) RETURNING id
+            """
+            result = await ejecutar_query(query, (chat_id, mensaje, fecha_utc), fetch=True)
+            nuevo_id = result[0]["id"]
+            fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+            return {"exito": True, "mensaje": f"🔔 Nuevo recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje}*"}
+        else:
+            fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+            hora_actual = ahora_cdmx().strftime("%I:%M %p")
+            return {
+                "exito": False,
+                "requiere_confirmacion": True,
+                "fecha_local": fecha_mostrar,
+                "mensaje": mensaje,
+                "error": f"⚠️ La fecha programada ({fecha_mostrar}) es muy cercana. La hora actual es {hora_actual}. ¿Confirmas? Responde 'sí' o 'no'.",
+                "datos_originales": {
+                    "mensaje": mensaje,
+                    "fecha_local": fecha_local.isoformat(),
+                    "fecha_utc": fecha_utc.isoformat()
+                }
+            }
     except Exception as e:
-        logger.error(f"Error en tool_crear_recordatorio: {e}", exc_info=True)
-        return {"exito": False, "error": f"Error al preparar el recordatorio: {str(e)}"}
+        logger.error(f"Error en tool_crear_recordatorio: {e}")
+        return {"exito": False, "error": f"Error al programar recordatorio: {str(e)}"}
 
 
 async def tool_consultar_recordatorios(chat_id: int):
@@ -961,38 +743,17 @@ async def tool_consultar_recordatorios(chat_id: int):
     """
     resultados = await ejecutar_query(query, (chat_id,), fetch=True)
     if not resultados:
-        return {
-            "exito": True,
-            "mensaje": "No hay recordatorios pendientes en este momento.",
-            "data": [],
-        }
+        return {"exito": True, "mensaje": "No hay recordatorios pendientes.", "data": []}
     data = []
     for r in resultados:
         fecha_local = utc_a_local(r["fecha_recordatorio"])
-        data.append(
-            {
-                "id_recordatorio": r["id"],
-                "mensaje": r["mensaje"],
-                "fecha_local": fecha_local.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        )
+        data.append({"id_recordatorio": r["id"], "mensaje": r["mensaje"], "fecha_local": fecha_local.strftime("%Y-%m-%d %H:%M:%S")})
     return {"exito": True, "data": data}
 
 
 async def tool_borrar_recordatorio(id_recordatorio: int, chat_id: int):
-    result = await ejecutar_query(
-        "DELETE FROM recordatorios WHERE id = $1 AND chat_id = $2",
-        (id_recordatorio, chat_id),
-    )
-    if not result or result.endswith(" 0"):
-        return {
-            "exito": False,
-            "error": f"No encontré un recordatorio pendiente con ID {id_recordatorio}.",
-        }
-    return {
-        "exito": True,
-        "mensaje": f"🗑️ Recordatorio con ID {id_recordatorio} eliminado.",
-    }
+    await ejecutar_query("DELETE FROM recordatorios WHERE id = $1 AND chat_id = $2", (id_recordatorio, chat_id))
+    return {"exito": True, "mensaje": f"🗑️ Recordatorio con ID {id_recordatorio} eliminado."}
 
 
 async def tool_editar_recordatorio(
@@ -1002,113 +763,51 @@ async def tool_editar_recordatorio(
     chat_id: int = None,
 ):
     if id_recordatorio is None:
-        return {
-            "exito": False,
-            "error": "❌ Para editar un recordatorio debes proporcionar el ID exacto.",
-        }
-
-    if chat_id is not None:
-        existe = await ejecutar_query(
-            "SELECT id, mensaje, fecha_recordatorio FROM recordatorios WHERE id = $1 AND chat_id = $2 AND enviado = FALSE",
-            (id_recordatorio, chat_id),
-            fetch=True,
-        )
-    else:
-        existe = await ejecutar_query(
-            "SELECT id, mensaje, fecha_recordatorio FROM recordatorios WHERE id = $1 AND enviado = FALSE",
-            (id_recordatorio,),
-            fetch=True,
-        )
-    if not existe:
-        return {
-            "exito": False,
-            "error": f"No encontré un recordatorio pendiente con ID {id_recordatorio}.",
-        }
-
+        return {"exito": False, "error": "❌ Para editar un recordatorio debes proporcionar el ID exacto."}
     updates, params = [], []
-    if nuevo_mensaje is not None and str(nuevo_mensaje).strip():
+    if nuevo_mensaje:
         updates.append(f"mensaje = ${len(params)+1}")
-        params.append(str(nuevo_mensaje).strip())
-
+        params.append(nuevo_mensaje)
     if nueva_fecha:
         fecha_normalizada, ambiguedad, fecha_local = interpretar_fecha(nueva_fecha)
-        if not fecha_normalizada or not fecha_local:
-            return {"exito": False, "error": ambiguedad or "Formato de fecha inválido."}
+        if not fecha_normalizada:
+            if ambiguedad:
+                return {"exito": False, "error": ambiguedad}
+            return {"exito": False, "error": "Formato de fecha inválido."}
         fecha_utc = local_a_utc(fecha_local)
-        ahora_utc = datetime.utcnow()
-        diferencia = (fecha_utc - ahora_utc).total_seconds()
-        if diferencia <= 180:
-            fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
-            hora_actual = ahora_cdmx().strftime("%I:%M %p")
-            return {
-                "exito": False,
-                "requiere_confirmacion": True,
-                "fecha_local": fecha_mostrar,
-                "mensaje": nuevo_mensaje or existe[0]["mensaje"],
-                "error": f"⚠️ La nueva fecha ({fecha_mostrar}) es muy cercana o ya pasó. La hora actual es {hora_actual}. ¿Quieres actualizarlo igualmente?",
-                "id_recordatorio": id_recordatorio,
-                "nuevo_mensaje": nuevo_mensaje,
-                "nueva_fecha": nueva_fecha,
-                "datos_originales": {
-                    "mensaje": nuevo_mensaje or existe[0]["mensaje"],
-                    "fecha_local": fecha_local.isoformat(),
-                    "fecha_utc": fecha_utc.isoformat(),
-                },
-            }
         updates.append(f"fecha_recordatorio = ${len(params)+1}")
         params.append(fecha_utc)
-
     if not updates:
         return {"exito": False, "error": "No se enviaron datos para actualizar."}
-
     params.append(id_recordatorio)
-    where = f"id = ${len(params)}"
     if chat_id is not None:
         params.append(chat_id)
-        where += f" AND chat_id = ${len(params)}"
-    query = f"UPDATE recordatorios SET {', '.join(updates)} WHERE {where}"
+        set_clause = ", ".join(updates)
+        query = f"UPDATE recordatorios SET {set_clause} WHERE id = ${len(params)-1} AND chat_id = ${len(params)}"
+    else:
+        set_clause = ", ".join(updates)
+        query = f"UPDATE recordatorios SET {set_clause} WHERE id = ${len(params)}"
     await ejecutar_query(query, params)
-    return {
-        "exito": True,
-        "mensaje": f"✏️ Recordatorio {id_recordatorio} actualizado correctamente.",
-    }
+    return {"exito": True, "mensaje": f"✏️ Recordatorio {id_recordatorio} actualizado correctamente."}
 
 
-# ==================== DEFINICIÓN DE TOOLS (16 tools) ====================
+# ==================== DEFINICIÓN DE TOOLS ====================
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "tool_registrar_proyecto",
-            "description": "Registra un nuevo proyecto para un cliente. Si falta información, pregunta antes de llamar.",
+            "description": "Registra un nuevo proyecto para un cliente.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto",
-                    },
-                    "descripcion": {
-                        "type": "string",
-                        "description": "Descripción del trabajo",
-                    },
-                    "monto": {
-                        "type": "number",
-                        "description": "Presupuesto total del proyecto",
-                    },
-                    "telefono": {
-                        "type": "string",
-                        "description": "Teléfono del cliente (opcional)",
-                    },
-                    "direccion": {
-                        "type": "string",
-                        "description": "Dirección del cliente (opcional)",
-                    },
-                    "notas": {
-                        "type": "string",
-                        "description": "Notas adicionales (opcional)",
-                    },
+                    "cliente": {"type": "string"},
+                    "nombre_corto": {"type": "string"},
+                    "descripcion": {"type": "string"},
+                    "monto": {"type": "number"},
+                    "telefono": {"type": "string"},
+                    "direccion": {"type": "string"},
+                    "notas": {"type": "string"},
                 },
                 "required": ["cliente", "nombre_corto", "descripcion", "monto"],
             },
@@ -1118,19 +817,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_registrar_pago",
-            "description": "Registra un pago o anticipo de un cliente. Usa el campo 'referencia' para especificar el proyecto si el cliente tiene varios.",
+            "description": "Registra un pago o anticipo.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "monto": {
-                        "type": "number",
-                        "description": "Monto del pago (debe ser > 0)",
-                    },
-                    "referencia": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional, para desambiguar si hay varios)",
-                    },
+                    "cliente": {"type": "string"},
+                    "monto": {"type": "number"},
+                    "referencia": {"type": "string"},
                 },
                 "required": ["cliente", "monto"],
             },
@@ -1140,23 +833,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_marcar_presupuesto_enviado",
-            "description": "Marca el flag de presupuesto enviado en un proyecto. NO cambia el estado si el proyecto ya avanzó (tiene pagos). Solo cambia el estado a 'Presupuesto enviado' si estaba en 'Pendiente de cotizar'.",
+            "description": "Marca un proyecto como presupuesto enviado.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional si solo tiene uno)",
-                    },
-                    "monto": {
-                        "type": "number",
-                        "description": "Nuevo monto total (opcional)",
-                    },
-                    "descripcion": {
-                        "type": "string",
-                        "description": "Nueva descripción (opcional)",
-                    },
+                    "cliente": {"type": "string"},
+                    "nombre_corto": {"type": "string"},
+                    "monto": {"type": "number"},
+                    "descripcion": {"type": "string"},
                 },
                 "required": ["cliente"],
             },
@@ -1166,23 +850,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_marcar_material_comprado",
-            "description": "Marca el material de un proyecto como comprado o pendiente. Escribe directamente en la columna 'material_comprado' del proyecto. Opcionalmente registra el costo del material.",
+            "description": "Marca el material de un proyecto como comprado.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional si solo tiene uno)",
-                    },
-                    "comprado": {
-                        "type": "boolean",
-                        "description": "True para marcar como comprado, False para pendiente (por defecto True)",
-                    },
-                    "costo_material": {
-                        "type": "number",
-                        "description": "Costo del material comprado (opcional)",
-                    },
+                    "cliente": {"type": "string"},
+                    "nombre_corto": {"type": "string"},
+                    "comprado": {"type": "boolean"},
+                    "costo_material": {"type": "number"},
                 },
                 "required": ["cliente"],
             },
@@ -1192,19 +867,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_consultar_proyectos",
-            "description": "Consulta proyectos según tipo. Devuelve un máximo de 5 resultados.",
+            "description": "Consulta proyectos según tipo.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "tipo": {
-                        "type": "string",
-                        "enum": ["activos", "liquidados", "cancelados", "deudores"],
-                        "description": "Tipo de consulta",
-                    },
-                    "cliente": {
-                        "type": "string",
-                        "description": "Nombre del cliente (opcional) para filtrar",
-                    },
+                    "tipo": {"type": "string", "enum": ["activos", "liquidados", "cancelados", "deudores"]},
+                    "cliente": {"type": "string"},
                 },
                 "required": [],
             },
@@ -1214,15 +882,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_cerrar_proyecto",
-            "description": "Liquida un proyecto. Usa 'nombre_corto' para desambiguar si hay varios.",
+            "description": "Liquida un proyecto.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional si solo tiene uno)",
-                    },
+                    "cliente": {"type": "string"},
+                    "nombre_corto": {"type": "string"},
                 },
                 "required": ["cliente"],
             },
@@ -1232,15 +897,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_cancelar_proyecto",
-            "description": "Cancela un proyecto. Usa 'nombre_corto' para desambiguar si hay varios.",
+            "description": "Cancela un proyecto.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional si solo tiene uno)",
-                    },
+                    "cliente": {"type": "string"},
+                    "nombre_corto": {"type": "string"},
                 },
                 "required": ["cliente"],
             },
@@ -1250,19 +912,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_borrar_proyecto",
-            "description": "BORRA FÍSICAMENTE un proyecto. Usa 'nombre_corto' para desambiguar si hay varios. Requiere confirmación explícita.",
+            "description": "BORRA FÍSICAMENTE un proyecto. Requiere confirmación.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional si solo tiene uno)",
-                    },
-                    "confirmado": {
-                        "type": "boolean",
-                        "description": "Debe ser true solo si el usuario confirmó explícitamente con 'sí'",
-                    },
+                    "cliente": {"type": "string"},
+                    "nombre_corto": {"type": "string"},
+                    "confirmado": {"type": "boolean"},
                 },
                 "required": ["cliente", "confirmado"],
             },
@@ -1272,18 +928,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_registrar_gasto",
-            "description": "Registra un gasto general (no asociado a proyecto).",
+            "description": "Registra un gasto general.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "descripcion": {
-                        "type": "string",
-                        "description": "Descripción del gasto",
-                    },
-                    "monto": {
-                        "type": "number",
-                        "description": "Monto del gasto (debe ser > 0)",
-                    },
+                    "descripcion": {"type": "string"},
+                    "monto": {"type": "number"},
                 },
                 "required": ["descripcion", "monto"],
             },
@@ -1293,14 +943,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_consultar_gastos",
-            "description": "Muestra los últimos gastos registrados.",
+            "description": "Muestra últimos gastos.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limite": {
-                        "type": "integer",
-                        "description": "Número de gastos a mostrar (por defecto 10)",
-                    },
+                    "limite": {"type": "integer"},
                 },
                 "required": [],
             },
@@ -1310,15 +957,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_explicar_estado",
-            "description": "Explica por qué un proyecto está en su estado actual. Usa 'nombre_corto' para desambiguar.",
+            "description": "Explica el estado de un proyecto.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {
-                        "type": "string",
-                        "description": "Nombre corto del proyecto (opcional si solo tiene uno)",
-                    },
+                    "cliente": {"type": "string"},
+                    "nombre_corto": {"type": "string"},
                 },
                 "required": ["cliente"],
             },
@@ -1328,26 +972,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_editar_cliente",
-            "description": "Edita o agrega información de un cliente existente.",
+            "description": "Edita información de un cliente.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "cliente": {
-                        "type": "string",
-                        "description": "Nombre del cliente a editar",
-                    },
-                    "telefono": {
-                        "type": "string",
-                        "description": "Nuevo número de teléfono (opcional)",
-                    },
-                    "direccion": {
-                        "type": "string",
-                        "description": "Nueva dirección (opcional)",
-                    },
-                    "notas": {
-                        "type": "string",
-                        "description": "Nuevas notas (opcional)",
-                    },
+                    "cliente": {"type": "string"},
+                    "telefono": {"type": "string"},
+                    "direccion": {"type": "string"},
+                    "notas": {"type": "string"},
                 },
                 "required": ["cliente"],
             },
@@ -1357,20 +989,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_crear_recordatorio",
-            "description": "PROGRAMA UN NUEVO RECORDATORIO. Interpreta fechas informales (ej. 'a las 2 con 35 de la mañana') y pregunta confirmación si hay ambigüedad.",
+            "description": "Programa un nuevo recordatorio. Acepta fechas informales.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "mensaje": {
-                        "type": "string",
-                        "description": "Texto del recordatorio",
-                    },
-                    "fecha_recordatorio": {
-                        "type": "string",
-                        "description": "Fecha y hora en formato informal (ej. 'hoy a las 2 con 35 de la mañana')",
-                    },
+                    "mensaje": {"type": "string"},
+                    "fecha_recordatorio": {"type": "string"}
                 },
-                "required": ["mensaje", "fecha_recordatorio"],
+                "required": ["mensaje", "fecha_recordatorio"]
             },
         },
     },
@@ -1378,7 +1004,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_consultar_recordatorios",
-            "description": "Muestra la lista de recordatorios pendientes y sus IDs.",
+            "description": "Muestra recordatorios pendientes.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -1390,14 +1016,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_borrar_recordatorio",
-            "description": "Elimina un recordatorio programado utilizando su ID exacto.",
+            "description": "Elimina un recordatorio por su ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "id_recordatorio": {
-                        "type": "integer",
-                        "description": "El ID numérico del recordatorio a borrar",
-                    }
+                    "id_recordatorio": {"type": "integer"}
                 },
                 "required": ["id_recordatorio"],
             },
@@ -1407,22 +1030,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_editar_recordatorio",
-            "description": "SOLO PARA EDITAR UN RECORDATORIO EXISTENTE. Requiere que el usuario proporcione el ID.",
+            "description": "Edita un recordatorio existente. Requiere ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "id_recordatorio": {
-                        "type": "integer",
-                        "description": "El ID numérico del recordatorio a editar (OBLIGATORIO)",
-                    },
-                    "nuevo_mensaje": {
-                        "type": "string",
-                        "description": "El nuevo texto del recordatorio (opcional)",
-                    },
-                    "nueva_fecha": {
-                        "type": "string",
-                        "description": "La nueva fecha en formato informal (opcional)",
-                    },
+                    "id_recordatorio": {"type": "integer"},
+                    "nuevo_mensaje": {"type": "string"},
+                    "nueva_fecha": {"type": "string"}
                 },
                 "required": ["id_recordatorio"],
             },
@@ -1449,380 +1063,633 @@ TOOL_FUNCTIONS = {
     "tool_editar_recordatorio": tool_editar_recordatorio,
 }
 
+
 # ==================== PROMPT ====================
 SYSTEM_PROMPT_BASE = (
     "Eres el asistente de gestión de proyectos de un taller de aluminio. "
-    "Tu tarea es ayudar a registrar datos, consultar materiales y administrar pagos. "
-    "No asumas información. Si el usuario escribe algo confuso, con errores tipográficos o incompleto, "
-    "PREGÚNTALE para aclarar antes de ejecutar cualquier acción. "
-    "Si no entiendes la fecha, hora o el mensaje, pide que lo repita con claridad. "
-    "NUNCA te quedes en silencio ni ejecutes sin confirmación si falta información. "
-    "Habla de forma directa y clara, usando 'jefe' o 'patrón' ocasionalmente. "
-    "Cuando muestres listas, preséntalas de manera ordenada, con emojis. "
-    "Si el usuario pide borrar algo, siempre pregunta confirmación primero. "
+    "Tu tarea es registrar datos, consultar materiales y administrar pagos. "
+    "No asumas información. Si algo está confuso, PREGÚNTALE al usuario. "
+    "Habla de forma directa, usando 'jefe' ocasionalmente. "
+    "Si el usuario pide borrar algo, pregunta confirmación primero. "
     "REGLA PARA RECORDATORIOS: "
-    "Cuando el usuario pida un recordatorio, interpreta la fecha y hora que menciona "
-    "(ej: 'a las 2 con 35 de la mañana') y llama a tool_crear_recordatorio directamente. "
-    "La herramienta ya se encarga de pedir confirmación si hay ambigüedad de AM/PM o si "
-    "la hora ya pasó — no le preguntes tú también en lenguaje natural antes de llamarla, "
-    "para no duplicar la pregunta y hacer esperar al jefe dos veces por lo mismo. "
-    "REGLA DE HERRAMIENTAS: "
-    "Si el usuario te pide hacer algo y NO tienes una herramienta específica para ello, "
-    "dilo claramente ('jefe, no tengo forma de hacer eso') en vez de usar otra herramienta "
-    "que no corresponde. NUNCA improvises usando una herramienta para algo que no fue diseñada. "
-    "Ejemplo: si quiere marcar material comprado, usa tool_marcar_material_comprado, NO "
-    "tool_marcar_presupuesto_enviado ni tool_editar_cliente."
+    "Cuando el usuario pida un recordatorio, pasa la fecha y hora tal como las mencionó "
+    "al parámetro fecha_recordatorio. NO intentes convertir a formato 24h tú mismo. "
+    "La herramienta se encarga. Si la herramienta devuelve ambigüedad AM/PM, repregunta al usuario. "
+    "Cuando el usuario aclare (ej: 'madrugada', 'de la tarde'), combina esa aclaración "
+    "con la fecha original y vuelve a llamar a tool_crear_recordatorio con la frase completa. "
+    "NUNCA guardes un recordatorio sin que la herramienta confirme éxito."
 )
 
-# ==================== PODA ====================
-def podar_historial(messages: List[Dict]) -> List[Dict]:
-    """Devuelve un historial seguro para la API: nunca deja tool_calls huérfanos."""
-    MAX_HISTORIAL = 12
-    if not messages:
-        return []
 
-    salida = []
+# ==================== PODA Y SANITIZACIÓN ====================
+def sanitizar_historial(messages: List[Dict]) -> List[Dict]:
+    """Elimina mensajes assistant con tool_calls que no tengan sus respuestas tool."""
+    if not messages:
+        return messages
+    sanitized = []
     i = 0
     while i < len(messages):
-        m = messages[i]
-        if not isinstance(m, dict) or m.get("role") not in {
-            "user",
-            "assistant",
-            "tool",
-        }:
-            i += 1
-            continue
-        if m.get("role") == "assistant" and m.get("tool_calls"):
-            ids = [
-                tc.get("id")
-                for tc in m.get("tool_calls", [])
-                if tc.get("id")
-            ]
-            tools = []
+        msg = messages[i]
+        sanitized.append(msg)
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            tool_call_ids = {tc["id"] for tc in msg["tool_calls"]}
+            responses_found = set()
             j = i + 1
             while j < len(messages) and messages[j].get("role") == "tool":
-                if messages[j].get("tool_call_id") in ids:
-                    tools.append(messages[j])
+                responses_found.add(messages[j].get("tool_call_id"))
+                sanitized.append(messages[j])
                 j += 1
-            found = {x.get("tool_call_id") for x in tools}
-            if not ids or not all(x in found for x in ids):
-                i = j
-                continue
-            salida.append(m)
-            salida.extend(tools)
-            i = j
-            continue
-        if m.get("role") == "tool":
-            i += 1
-            continue
-        salida.append(m)
+            if responses_found != tool_call_ids:
+                while sanitized and sanitized[-1].get("role") in ("tool", "assistant"):
+                    if sanitized[-1].get("role") == "assistant" and sanitized[-1].get("tool_calls"):
+                        sanitized.pop()
+                        break
+                    sanitized.pop()
+                logger.warning("⚠️ Bloque tool_calls incompleto eliminado")
         i += 1
-
-    if len(salida) > MAX_HISTORIAL:
-        salida = salida[-MAX_HISTORIAL:]
-    return salida
+    return sanitized
 
 
-# ==================== TRANSCRIPCIÓN DE VOZ ====================
-async def transcribir_audio(voice) -> Optional[str]:
-    """Transcribe un mensaje de voz usando Groq Whisper."""
+def podar_historial(messages: List[Dict]) -> List[Dict]:
+    MAX_HISTORIAL = 12
+    if len(messages) <= MAX_HISTORIAL:
+        return messages
+    start = len(messages) - MAX_HISTORIAL
+    while start > 0:
+        msg = messages[start]
+        if msg["role"] == "tool":
+            start -= 1
+            continue
+        if msg["role"] == "assistant" and msg.get("tool_calls"):
+            tool_call_ids = [tc["id"] for tc in msg["tool_calls"]]
+            next_msgs = messages[start + 1 : start + len(tool_call_ids) + 1]
+            found_ids = [m["tool_call_id"] for m in next_msgs if m["role"] == "tool"]
+            if not all(tid in found_ids for tid in tool_call_ids):
+                start -= 1
+                continue
+        break
+    start = max(0, start)
+    return messages[start:]
+
+
+# ==================== AUDIO ====================
+def transcribir_audio_buffer(buffer: io.BytesIO) -> str:
     if not groq_client:
-        return None
+        return ""
+    buffer.seek(0)
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        tmp.write(buffer.read())
+        tmp_path = tmp.name
     try:
-        with io.BytesIO() as audio_buf:
-            await voice.get_file().download_to_memory(audio_buf)
-            audio_buf.seek(0)
-            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-                tmp.write(audio_buf.read())
-                tmp_path = tmp.name
-        with open(tmp_path, "rb") as audio_file:
-            resultado = groq_client.audio.transcriptions.create(
+        with open(tmp_path, "rb") as f:
+            transcription = groq_client.audio.transcriptions.create(
+                file=(tmp_path, f.read()),
                 model="whisper-large-v3",
-                file=audio_file,
                 language="es",
-                response_format="text",
             )
-        os.unlink(tmp_path)
-        return resultado.strip() if resultado else None
+        return transcription.text
     except Exception as e:
-        logger.error(f"Error transcribiendo audio: {e}", exc_info=True)
-        return None
+        logger.error(f"Error transcribiendo audio: {e}")
+        return ""
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
-# ==================== LLAMADA AL LLM ====================
-async def llamar_llm(chat_id: int, historial: List[Dict]) -> Dict:
-    """Llama a DeepSeek con el historial podado y las tools."""
-    mensajes = podar_historial(historial)
-    system_msg = {"role": "system", "content": SYSTEM_PROMPT_BASE}
-    payload = [system_msg] + mensajes
-
+# ==================== PROCESAR MENSAJE ====================
+async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     try:
-        response = await deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=payload,
-            tools=TOOLS,
-            tool_choice="auto",
-            temperature=0.1,
-            max_tokens=1024,
-        )
-        return response.choices[0].message.model_dump()
-    except Exception as e:
-        logger.error(f"Error llamando a DeepSeek: {e}", exc_info=True)
-        return {"role": "assistant", "content": "⚠️ Tuve un problema al procesar tu solicitud. Intenta de nuevo, jefe."}
+        if not texto:
+            await update.message.reply_text("No entendí el mensaje. ¿Puedes repetirlo?")
+            return
 
+        chat_id = update.effective_chat.id
+        await guardar_historial(chat_id, {"role": "user", "content": texto})
 
-# ==================== EJECUTAR TOOLS ====================
-async def ejecutar_tool_call(tool_call: Dict, chat_id: int) -> Dict:
-    """Ejecuta una llamada a tool y devuelve el resultado como dict."""
-    nombre = tool_call.get("function", {}).get("name", "")
-    try:
-        args = json.loads(tool_call.get("function", {}).get("arguments", "{}"))
-    except json.JSONDecodeError:
-        return {
-            "exito": False,
-            "error": "Error al leer los parámetros de la herramienta.",
+        historial = await obtener_historial(chat_id, 20)
+        historial_podado = podar_historial(historial)
+        historial_podado = sanitizar_historial(historial_podado)
+
+        fecha_actual = ahora_cdmx().strftime("%Y-%m-%d %H:%M")
+        system_msg = {
+            "role": "system",
+            "content": f"La fecha y hora actual en México es: {fecha_actual}. {SYSTEM_PROMPT_BASE}",
         }
+        mensajes_api = [system_msg] + historial_podado
 
-    func = TOOL_FUNCTIONS.get(nombre)
-    if not func:
-        return {"exito": False, "error": f"Herramienta '{nombre}' no encontrada."}
-
-    # Inyectar chat_id si la función lo necesita
-    import inspect
-    sig = inspect.signature(func)
-    if "chat_id" in sig.parameters and "chat_id" not in args:
-        args["chat_id"] = chat_id
-
-    try:
-        resultado = await func(**args)
-        return resultado if isinstance(resultado, dict) else {"exito": True, "mensaje": str(resultado)}
-    except Exception as e:
-        logger.error(f"Error ejecutando {nombre}: {e}", exc_info=True)
-        return {"exito": False, "error": f"Error interno al ejecutar {nombre}: {str(e)}"}
-
-
-# ==================== CONFIRMAR RECORDATORIO ====================
-async def confirmar_recordatorio(chat_id: int, datos: Dict) -> str:
-    """Inserta el recordatorio confirmado en la base de datos."""
-    try:
-        mensaje = datos["mensaje"]
-        fecha_utc_str = datos["fecha_utc"]
-        fecha_utc = datetime.fromisoformat(fecha_utc_str)
-
-        await ejecutar_query(
-            "INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio) VALUES ($1, $2, $3)",
-            (chat_id, mensaje, fecha_utc),
-        )
-
-        fecha_local = utc_a_local(fecha_utc)
-        fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
-        return f"✅ Recordatorio programado para el {fecha_mostrar}.\n\n📝 {mensaje}"
-    except Exception as e:
-        logger.error(f"Error confirmando recordatorio: {e}", exc_info=True)
-        return "⚠️ Error al guardar el recordatorio. Intenta de nuevo."
-
-
-# ==================== PROCESAMIENTO DE MENSAJES ====================
-async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-
-    # Transcribir voz o tomar texto
-    texto = None
-    if update.message and update.message.voice:
-        await update.message.reply_chat_action("typing")
-        texto = await transcribir_audio(update.message.voice)
-        if texto:
-            await update.message.reply_text(f"📝 \"{texto}\"")
-        else:
-            await update.message.reply_text("⚠️ No pude entender el audio, jefe. ¿Puedes repetirlo por texto?")
-            return
-    elif update.message and update.message.text:
-        texto = update.message.text.strip()
-    else:
-        return
-
-    if not texto:
-        return
-
-    # Obtener historial
-    historial = await obtener_historial(chat_id)
-    user_msg = {"role": "user", "content": texto}
-    historial.append(user_msg)
-    await guardar_historial(chat_id, user_msg)
-
-    # Detectar confirmación de recordatorio pendiente
-    datos_pendientes = context.user_data.get("recordatorio_pendiente")
-    if datos_pendientes:
-        texto_lower = texto.lower().strip()
-        if texto_lower in ("sí", "si", "yes", "confirmo", "confirmo.", "confirmar"):
-            resultado_texto = await confirmar_recordatorio(chat_id, datos_pendientes)
-            context.user_data.pop("recordatorio_pendiente", None)
-            assistant_msg = {"role": "assistant", "content": resultado_texto}
-            await guardar_historial(chat_id, assistant_msg)
-            await update.message.reply_text(resultado_texto)
-            return
-        elif texto_lower in ("no", "cancelar", "olvidalo", "olvídalo", "nop"):
-            context.user_data.pop("recordatorio_pendiente", None)
-            assistant_msg = {"role": "assistant", "content": "❌ Recordatorio cancelado."}
-            await guardar_historial(chat_id, assistant_msg)
-            await update.message.reply_text("❌ Recordatorio cancelado.")
-            return
-        elif texto_lower.startswith("mañana"):
-            # Reprogramar para mañana
-            import copy
-            datos_mañana = copy.deepcopy(datos_pendientes)
-            fecha_local = datetime.fromisoformat(datos_mañana["fecha_local"])
-            fecha_mañana = fecha_local + timedelta(days=1)
-            fecha_utc_mañana = local_a_utc(fecha_mañana)
-            datos_mañana["fecha_local"] = fecha_mañana.isoformat()
-            datos_mañana["fecha_utc"] = fecha_utc_mañana.isoformat()
-            resultado_texto = await confirmar_recordatorio(chat_id, datos_mañana)
-            context.user_data.pop("recordatorio_pendiente", None)
-            assistant_msg = {"role": "assistant", "content": resultado_texto}
-            await guardar_historial(chat_id, assistant_msg)
-            await update.message.reply_text(resultado_texto)
-            return
-
-    # Llamar al LLM
-    respuesta_llm = await llamar_llm(chat_id, historial)
-
-    # Guardar respuesta del asistente
-    await guardar_historial(chat_id, respuesta_llm)
-
-    # Si hay tool_calls, ejecutarlas
-    if respuesta_llm.get("tool_calls"):
-        tool_results = []
-        for tc in respuesta_llm["tool_calls"]:
-            resultado = await ejecutar_tool_call(tc, chat_id)
-            tool_msg = {
-                "role": "tool",
-                "tool_call_id": tc["id"],
-                "content": json.dumps(resultado, ensure_ascii=False, default=str),
-            }
-            tool_results.append(tool_msg)
-            await guardar_historial(chat_id, tool_msg)
-
-            # Si la tool requiere confirmación de recordatorio
-            if resultado.get("requiere_confirmacion") and resultado.get("datos_originales"):
-                context.user_data["recordatorio_pendiente"] = resultado["datos_originales"]
-                await update.message.reply_text(resultado["error"])
+        max_iteraciones = 5
+        for _ in range(max_iteraciones):
+            try:
+                response = await deepseek_client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=mensajes_api,
+                    tools=TOOLS,
+                    tool_choice="auto",
+                    temperature=0.2,
+                    max_tokens=4000,
+                )
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"❌ Error real de DeepSeek: {error_msg}", exc_info=True)
+                if "tool_calls must be followed by tool" in error_msg.lower() or "400" in error_msg:
+                    logger.warning("🧹 Historial corrupto. Limpiando...")
+                    await limpiar_historial(chat_id)
+                    await update.message.reply_text("⚠️ Limpié mi memoria automáticamente. Repite tu petición, jefe.")
+                elif "maximum context length" in error_msg.lower() or "token" in error_msg.lower():
+                    await update.message.reply_text("⚠️ Conversación muy larga. Escribe /start para reiniciar.")
+                else:
+                    await update.message.reply_text(f"❌ Error: {error_msg[:100]}")
+                context.user_data["confirmacion_pendiente"] = None
+                context.user_data["esperando_seleccion"] = None
+                context.user_data["esperando_aclaracion_fecha"] = None
                 return
 
-        # Segunda llamada al LLM con los resultados de las tools
-        historial = await obtener_historial(chat_id)
-        segunda_respuesta = await llamar_llm(chat_id, historial)
-        await guardar_historial(chat_id, segunda_respuesta)
+            message = response.choices[0].message
+            if not message.tool_calls:
+                respuesta = message.content
+                if respuesta:
+                    await guardar_historial(chat_id, {"role": "assistant", "content": respuesta})
+                    await update.message.reply_text(respuesta, parse_mode="Markdown")
+                else:
+                    await update.message.reply_text("⚠️ No entendí. ¿Puedes reformular?")
+                return
 
-        texto_respuesta = segunda_respuesta.get("content", "")
-        if texto_respuesta:
-            await update.message.reply_text(texto_respuesta)
-        return
+            tool_calls = message.tool_calls
 
-    # Respuesta directa sin tools
-    texto_respuesta = respuesta_llm.get("content", "")
-    if texto_respuesta:
-        await update.message.reply_text(texto_respuesta)
+            for tool_call in tool_calls:
+                if tool_call.function.name == "tool_editar_recordatorio":
+                    args = json.loads(tool_call.function.arguments)
+                    id_en_mensaje = re.search(r'\b\d+\b', texto)
+                    palabras_edicion = ['edita', 'cambia', 'modifica', 'mueve', 'actualiza']
+                    es_edicion = any(p in texto.lower() for p in palabras_edicion)
+                    if not id_en_mensaje or not es_edicion:
+                        logger.info(f"🔄 Redirigiendo edición sin ID a creación")
+                        mensaje_texto = args.get('nuevo_mensaje', texto)
+                        fecha_texto = args.get('nueva_fecha')
+                        if fecha_texto:
+                            tool_calls[0].function.name = "tool_crear_recordatorio"
+                            nuevos_args = {"mensaje": mensaje_texto, "fecha_recordatorio": fecha_texto}
+                            tool_calls[0].function.arguments = json.dumps(nuevos_args)
+                        else:
+                            await update.message.reply_text("⚠️ No entendí la fecha. Repite con fecha y hora.")
+                            return
 
+            mensaje_asistente = {
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": [tc.model_dump() for tc in tool_calls],
+            }
+            await guardar_historial(chat_id, mensaje_asistente)
 
-# ==================== COMANDOS ====================
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔨 *Asistente Taller de Aluminio*\n\n"
-        "Envíame un mensaje de voz o texto para:\n"
-        "• Registrar proyectos y clientes\n"
-        "• Registrar pagos y anticipos\n"
-        "• Consultar proyectos activos/liquidados\n"
-        "• Marcar presupuestos enviados\n"
-        "• Marcar material comprado\n"
-        "• Programar recordatorios\n"
-        "• Registrar gastos generales\n\n"
-        "¿En qué te ayudo, jefe?",
-        parse_mode="Markdown",
-    )
+            for i, tool_call in enumerate(tool_calls):
+                function_name = tool_call.function.name
+                function_args = json.loads(tool_call.function.arguments)
 
+                if function_name in ["tool_crear_recordatorio", "tool_consultar_recordatorios", "tool_borrar_recordatorio", "tool_editar_recordatorio"]:
+                    function_args["chat_id"] = chat_id
 
-async def cmd_limpiar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    await limpiar_historial(chat_id)
-    context.user_data.clear()
-    await update.message.reply_text("🧹 Historial limpiado.")
+                tool_func = TOOL_FUNCTIONS.get(function_name)
+                if not tool_func:
+                    result = {"error": f"Tool '{function_name}' no encontrada."}
+                else:
+                    try:
+                        result = await tool_func(**function_args)
+                    except Exception as e:
+                        logger.error(f"Error ejecutando tool {function_name}: {e}")
+                        result = {"error": str(e)}
 
+                await guardar_historial(chat_id, {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(result),
+                })
 
-async def cmd_recordatorios(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    resultado = await tool_consultar_recordatorios(chat_id)
-    if not resultado.get("data"):
-        await update.message.reply_text(resultado.get("mensaje", "No hay recordatorios."))
-        return
-    lineas = ["⏰ Recordatorios pendientes:"]
-    for r in resultado["data"]:
-        lineas.append(f"  • ID {r['id_recordatorio']}: {r['mensaje']} — {r['fecha_local']}")
-    await update.message.reply_text("\n".join(lineas))
+                necesita_salir = (
+                    result.get("requiere_aclaracion_fecha") or
+                    result.get("requiere_confirmacion") or
+                    result.get("requiere_seleccion") or
+                    (result.get("exito") is False and "requiere_confirmacion" not in result and "requiere_seleccion" not in result and "requiere_aclaracion_fecha" not in result)
+                )
 
+                if necesita_salir:
+                    for remaining_tool in tool_calls[i+1:]:
+                        await guardar_historial(chat_id, {
+                            "role": "tool",
+                            "tool_call_id": remaining_tool.id,
+                            "content": json.dumps({"exito": False, "error": "Acción cancelada."})
+                        })
 
-# ==================== REVISIÓN DE RECORDATORIOS ====================
-async def revisar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
-    """Job periódico que envía recordatorios vencidos."""
-    ahora = datetime.utcnow()
-    query = """
-        SELECT id, chat_id, mensaje
-        FROM recordatorios
-        WHERE enviado = FALSE AND fecha_recordatorio <= $1
-        ORDER BY fecha_recordatorio ASC
-        LIMIT 10
-    """
-    resultados = await ejecutar_query(query, (ahora,), fetch=True)
-    for r in resultados:
+                if result.get("requiere_aclaracion_fecha"):
+                    context.user_data["esperando_aclaracion_fecha"] = {
+                        "mensaje_original": result.get("mensaje_original", ""),
+                        "fecha_ambigua": result.get("fecha_ambigua", ""),
+                        "chat_id": chat_id,
+                    }
+                    await update.message.reply_text(result.get("error", "¿AM o PM?"))
+                    return
+
+                if result.get("requiere_confirmacion"):
+                    context.user_data["confirmacion_pendiente"] = {
+                        "tool_name": function_name,
+                        "args_originales": function_args,
+                        "fecha_mostrar": result.get("fecha_local"),
+                        "mensaje": result.get("mensaje"),
+                        "chat_id": chat_id,
+                        "datos_originales": result.get("datos_originales"),
+                        "id_recordatorio": result.get("id_recordatorio"),
+                        "nuevo_mensaje": result.get("nuevo_mensaje"),
+                        "nueva_fecha": result.get("nueva_fecha")
+                    }
+                    await update.message.reply_text(
+                        f"{result.get('error')}\n\nResponde 'sí', 'mañana' o 'no'."
+                    )
+                    return
+
+                if result.get("requiere_seleccion"):
+                    opciones = result.get("opciones", [])
+                    mensaje_opciones = f"{result.get('error', '')}\n\n"
+                    for idx_op, opcion in enumerate(opciones, 1):
+                        mensaje_opciones += f"{idx_op}. {opcion}\n"
+                    mensaje_opciones += "\nResponde con el número o nombre del proyecto."
+                    await update.message.reply_text(mensaje_opciones, parse_mode="Markdown")
+                    context.user_data["esperando_seleccion"] = {
+                        "tool_name": function_name,
+                        "args_originales": function_args,
+                        "opciones": opciones,
+                        "cliente": function_args.get("cliente", ""),
+                    }
+                    return
+
+                if result.get("exito") is False:
+                    await update.message.reply_text(f"❌ {result.get('error', 'Error desconocido.')}")
+                    return
+
+            historial = await obtener_historial(chat_id, 20)
+            historial_podado = podar_historial(historial)
+            historial_podado = sanitizar_historial(historial_podado)
+            mensajes_api = [system_msg] + historial_podado
+
+        await update.message.reply_text("No pude procesar tu solicitud. ¿Puedes reformular?")
+
+    except Exception as e:
+        logger.error(f"❌ Error inesperado en procesar_mensaje: {e}", exc_info=True)
         try:
-            await context.bot.send_message(
-                chat_id=r["chat_id"],
-                text=f"🔔 RECORDATORIO:\n{r['mensaje']}",
+            await update.message.reply_text("⚠️ Ocurrió un error. Intenta de nuevo.")
+        except:
+            pass
+
+
+# ==================== MANEJO DE ACLARACIÓN DE FECHA (AM/PM) ====================
+async def manejar_aclaracion_fecha(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    """Cuando el usuario aclara AM/PM, combina con la fecha original y guarda directamente."""
+    try:
+        datos = context.user_data.get("esperando_aclaracion_fecha")
+        if not datos:
+            return False
+
+        mensaje_original = datos.get("mensaje_original", "")
+        fecha_ambigua = datos.get("fecha_ambigua", "")
+        chat_id = datos.get("chat_id", update.effective_chat.id)
+
+        texto_combinado = f"{fecha_ambigua} {texto}"
+        logger.info(f"🔄 Combinando fecha: '{fecha_ambigua}' + '{texto}' = '{texto_combinado}'")
+
+        fecha_normalizada, ambiguedad, fecha_local = interpretar_fecha(texto_combinado)
+
+        if ambiguedad:
+            await update.message.reply_text(f"⚠️ {ambiguedad}")
+            return True
+
+        if not fecha_local:
+            await update.message.reply_text("⚠️ No entendí la hora. Usa formato numérico (ej: '3:30 AM').")
+            context.user_data["esperando_aclaracion_fecha"] = None
+            return True
+
+        fecha_utc = local_a_utc(fecha_local)
+        ahora_utc = datetime.utcnow()
+        diferencia = (fecha_utc - ahora_utc).total_seconds()
+
+        if diferencia < -120:
+            fecha_local = fecha_local + timedelta(days=1)
+            fecha_utc = local_a_utc(fecha_local)
+
+        query = """
+            INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado)
+            VALUES ($1, $2, $3, FALSE) RETURNING id
+        """
+        await ejecutar_query(query, (chat_id, mensaje_original, fecha_utc), fetch=True)
+        fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+        mensaje_respuesta = f"✅ Recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje_original}*"
+        await guardar_historial(chat_id, {"role": "assistant", "content": mensaje_respuesta})
+        await update.message.reply_text(mensaje_respuesta, parse_mode="Markdown")
+
+        context.user_data["esperando_aclaracion_fecha"] = None
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Error en manejar_aclaracion_fecha: {e}", exc_info=True)
+        await update.message.reply_text("⚠️ Error procesando la aclaración. Intenta de nuevo.")
+        context.user_data["esperando_aclaracion_fecha"] = None
+        return True
+
+
+# ==================== MANEJO DE CONFIRMACIÓN ====================
+async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    try:
+        confirmacion = context.user_data.get("confirmacion_pendiente")
+        if not confirmacion:
+            return False
+
+        texto_lower = texto.lower()
+        palabras_afirmativas = ["sí", "si", "yes", "y", "dale", "ok", "confirmo", "confirmar", "programa", "programar", "adelante"]
+        es_afirmativo = any(p in texto_lower for p in palabras_afirmativas)
+        es_manana = "mañana" in texto_lower or "manana" in texto_lower
+
+        if es_afirmativo or es_manana:
+            tool_name = confirmacion["tool_name"]
+            chat_id = confirmacion["chat_id"]
+            datos = confirmacion.get("datos_originales")
+
+            if not datos or "fecha_utc" not in datos:
+                await update.message.reply_text("⚠️ No pude entender la fecha. Repite tu petición.")
+                context.user_data["confirmacion_pendiente"] = None
+                return True
+
+            if es_manana and "fecha_local" in datos:
+                try:
+                    fecha_local_str = datos["fecha_local"]
+                    if isinstance(fecha_local_str, str):
+                        fecha_local = datetime.fromisoformat(fecha_local_str)
+                    else:
+                        fecha_local = fecha_local_str
+                    fecha_local = fecha_local + timedelta(days=1)
+                    fecha_utc = local_a_utc(fecha_local)
+                    datos["fecha_local"] = fecha_local.isoformat()
+                    datos["fecha_utc"] = fecha_utc.isoformat()
+                except Exception as e:
+                    logger.error(f"Error ajustando fecha a mañana: {e}")
+
+            if tool_name == "tool_crear_recordatorio" and datos:
+                mensaje = datos["mensaje"]
+                try:
+                    fecha_utc_str = datos["fecha_utc"]
+                    if isinstance(fecha_utc_str, str):
+                        fecha_utc = datetime.fromisoformat(fecha_utc_str)
+                    else:
+                        fecha_utc = fecha_utc_str
+                    fecha_local_str = datos["fecha_local"]
+                    if isinstance(fecha_local_str, str):
+                        fecha_local = datetime.fromisoformat(fecha_local_str)
+                    else:
+                        fecha_local = fecha_local_str
+                except Exception as e:
+                    logger.error(f"Error parseando fechas: {e}")
+                    await update.message.reply_text("⚠️ Error con la fecha. Intenta de nuevo.")
+                    context.user_data["confirmacion_pendiente"] = None
+                    return True
+
+                query = """
+                    INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado)
+                    VALUES ($1, $2, $3, FALSE) RETURNING id
+                """
+                await ejecutar_query(query, (chat_id, mensaje, fecha_utc), fetch=True)
+                fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+                mensaje_respuesta = f"✅ Recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje}*"
+                await guardar_historial(chat_id, {"role": "assistant", "content": mensaje_respuesta})
+                await update.message.reply_text(mensaje_respuesta, parse_mode="Markdown")
+            else:
+                args = confirmacion["args_originales"]
+                args["chat_id"] = chat_id
+                tool_func = TOOL_FUNCTIONS.get(tool_name)
+                if tool_func:
+                    try:
+                        result = await tool_func(**args)
+                        if result.get("exito"):
+                            await update.message.reply_text(f"✅ {result.get('mensaje', 'Acción completada.')}")
+                        else:
+                            await update.message.reply_text(f"❌ {result.get('error', 'Error.')}")
+                    except Exception as e:
+                        await update.message.reply_text(f"❌ Error: {str(e)}")
+            context.user_data["confirmacion_pendiente"] = None
+            return True
+        else:
+            context.user_data["confirmacion_pendiente"] = None
+            await update.message.reply_text("❌ Cancelado.")
+            return True
+
+    except Exception as e:
+        logger.error(f"❌ Error en manejar_confirmacion: {e}", exc_info=True)
+        await update.message.reply_text("⚠️ Error procesando confirmación.")
+        context.user_data["confirmacion_pendiente"] = None
+        return True
+
+
+# ==================== MANEJO DE SELECCIÓN ====================
+async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    try:
+        seleccion_data = context.user_data.get("esperando_seleccion")
+        if not seleccion_data:
+            return False
+
+        tool_name = seleccion_data["tool_name"]
+        args_originales = seleccion_data["args_originales"]
+        opciones = seleccion_data["opciones"]
+        seleccionado = None
+        texto_limpio = texto.strip().lower()
+
+        if texto_limpio.isdigit():
+            idx = int(texto_limpio) - 1
+            if 0 <= idx < len(opciones):
+                seleccionado = opciones[idx]
+                match = re.search(r"'([^']+)'", seleccionado)
+                if match:
+                    args_originales["nombre_corto"] = match.group(1)
+        else:
+            for opcion in opciones:
+                match = re.search(r"'([^']+)'", opcion)
+                if match:
+                    nombre_opcion = match.group(1).lower()
+                    if nombre_opcion in texto_limpio or texto_limpio in nombre_opcion:
+                        args_originales["nombre_corto"] = match.group(1)
+                        seleccionado = opcion
+                        break
+
+        if not seleccionado:
+            await update.message.reply_text(
+                f"⚠️ No entendí. Las opciones son:\n\n" +
+                "\n".join([f"{i+1}. {op}" for i, op in enumerate(opciones)]) +
+                "\n\nResponde con el número o nombre."
             )
-            await ejecutar_query(
-                "UPDATE recordatorios SET enviado = TRUE WHERE id = $1", (r["id"],)
-            )
+            return True
+
+        context.user_data["esperando_seleccion"] = None
+        tool_func = TOOL_FUNCTIONS.get(tool_name)
+        if not tool_func:
+            await update.message.reply_text("❌ Error: herramienta no encontrada.")
+            return True
+
+        try:
+            result = await tool_func(**args_originales)
+            chat_id = update.effective_chat.id
+            if result.get("exito"):
+                texto_resultado = f"✅ {result.get('mensaje', 'Completado.')}"
+            else:
+                texto_resultado = f"❌ {result.get('error', 'Error.')}"
+            await guardar_historial(chat_id, {"role": "assistant", "content": texto_resultado})
+            await update.message.reply_text(texto_resultado)
         except Exception as e:
-            logger.error(f"Error enviando recordatorio {r['id']}: {e}")
+            logger.error(f"Error ejecutando tool: {e}")
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Error en manejar_seleccion: {e}", exc_info=True)
+        await update.message.reply_text("⚠️ Error procesando selección.")
+        return True
 
 
-# ==================== STARTUP / SHUTDOWN ====================
-async def post_init(application):
+# ==================== MANEJADORES ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = update.effective_chat.id
+        await limpiar_historial(chat_id)
+        context.user_data["esperando_seleccion"] = None
+        context.user_data["confirmacion_pendiente"] = None
+        context.user_data["esperando_aclaracion_fecha"] = None
+        await update.message.reply_text(
+            "¡Hola, jefe! 🛠️ Soy su asistente.\n\n"
+            "Puedo ayudarle a:\n"
+            "- Registrar clientes y proyectos\n"
+            "- Registrar pagos y anticipos\n"
+            "- Consultar proyectos\n"
+            "- Programar recordatorios\n\n"
+            "💡 Si me confundo, escribe /start para reiniciar."
+        )
+    except Exception as e:
+        logger.error(f"❌ Error en start: {e}", exc_info=True)
+
+
+async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        texto = update.message.text if update.message else ""
+        texto_lower = texto.lower() if texto else ""
+
+        # Válvula de escape
+        if any(palabra in texto_lower for palabra in ["cancelar", "olvida", "reiniciar", "basta", "no importa"]):
+            context.user_data["confirmacion_pendiente"] = None
+            context.user_data["esperando_seleccion"] = None
+            context.user_data["esperando_aclaracion_fecha"] = None
+            await update.message.reply_text("✅ Operación cancelada. ¿En qué más te ayudo?")
+            return
+
+        # PRIORIDAD 1: Aclaración de fecha (AM/PM)
+        if context.user_data.get("esperando_aclaracion_fecha"):
+            if update.message.text:
+                await manejar_aclaracion_fecha(update, context, update.message.text)
+            else:
+                await update.message.reply_text("⚠️ Responde 'AM', 'PM', 'mañana' o 'tarde'.")
+            return
+
+        # PRIORIDAD 2: Confirmación
+        if context.user_data.get("confirmacion_pendiente"):
+            if update.message.text:
+                await manejar_confirmacion(update, context, update.message.text)
+            else:
+                await update.message.reply_text("⚠️ Responde 'sí', 'mañana' o 'no'.")
+            return
+
+        # PRIORIDAD 3: Selección
+        if context.user_data.get("esperando_seleccion"):
+            if update.message.text:
+                await manejar_seleccion(update, context, update.message.text)
+            else:
+                await update.message.reply_text("⚠️ Responde con texto para seleccionar.")
+            return
+
+        # Normal: procesar mensaje
+        if update.message.text:
+            await procesar_mensaje(update, context, update.message.text)
+        elif update.message.voice:
+            if not groq_client:
+                await update.message.reply_text("❌ Transcripción no configurada.")
+                return
+            try:
+                await update.message.reply_text("🎙️ Escuchando...")
+                voice_file = await update.message.voice.get_file()
+                buffer = io.BytesIO()
+                await voice_file.download_to_memory(buffer)
+                texto = await asyncio.to_thread(transcribir_audio_buffer, buffer)
+                if not texto:
+                    await update.message.reply_text("❌ No entendí el audio.")
+                    return
+                await update.message.reply_text(f"📝 *\"{texto}\"*", parse_mode="Markdown")
+                await procesar_mensaje(update, context, texto)
+            except Exception as e:
+                logger.error(f"Error manejando audio: {e}")
+                await update.message.reply_text("❌ Error con el audio.")
+
+    except Exception as e:
+        logger.error(f"❌ Error en handler: {e}", exc_info=True)
+        context.user_data["confirmacion_pendiente"] = None
+        context.user_data["esperando_seleccion"] = None
+        context.user_data["esperando_aclaracion_fecha"] = None
+        try:
+            await update.message.reply_text("⚠️ Error. Intenta de nuevo.")
+        except:
+            pass
+
+
+# ==================== RECORDATORIOS JOB ====================
+async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        query = """
+            SELECT id, chat_id, mensaje, fecha_recordatorio
+            FROM recordatorios
+            WHERE enviado = FALSE AND fecha_recordatorio <= (NOW() AT TIME ZONE 'UTC')
+        """
+        pendientes = await ejecutar_query(query, fetch=True)
+        logger.info(f"🔍 Revisando recordatorios: {len(pendientes)} pendientes")
+        for row in pendientes:
+            mensaje = f"🔔 *RECORDATORIO:*\n{row['mensaje']}"
+            try:
+                await context.bot.send_message(chat_id=row['chat_id'], text=mensaje, parse_mode="Markdown")
+                await ejecutar_query("UPDATE recordatorios SET enviado = TRUE WHERE id = $1", (row['id'],))
+                logger.info(f"✅ Recordatorio {row['id']} enviado")
+            except Exception as e:
+                logger.error(f"❌ Error enviando recordatorio {row['id']}: {e}")
+    except Exception as e:
+        logger.error(f"❌ Error en checar_recordatorios: {e}")
+
+
+# ==================== INICIO ====================
+async def post_init(app):
     await init_db_pool()
     await crear_tablas()
-    # Revisar recordatorios cada 30 segundos
-    application.job_queue.run_repeating(
-        revisar_recordatorios, interval=30, first=5, name="revisar_recordatorios"
-    )
-    logger.info("🚀 Bot iniciado correctamente.")
+    logger.info("✅ Base de datos inicializada.")
 
 
-async def post_shutdown(application):
-    if _db_pool:
-        await _db_pool.close()
-        logger.info("🔴 Pool de conexiones cerrado.")
-
-
-# ==================== MAIN ====================
 def main():
     app = (
         ApplicationBuilder()
         .token(TOKEN)
         .post_init(post_init)
-        .post_shutdown(post_shutdown)
         .build()
     )
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("limpiar", cmd_limpiar))
-    app.add_handler(CommandHandler("recordatorios", cmd_recordatorios))
-    app.add_handler(
-        MessageHandler(
-            filters.VOICE | filters.TEXT & ~filters.COMMAND, procesar_mensaje
-        )
-    )
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
+    app.add_handler(MessageHandler(filters.VOICE, handler))
 
-    logger.info("Iniciando bot...")
-    app.run_polling(drop_pending_updates=True)
+    job_queue = app.job_queue
+    if job_queue:
+        job_queue.run_repeating(checar_recordatorios, interval=60, first=10)
+        logger.info("✅ JobQueue para recordatorios iniciado.")
+    else:
+        logger.warning("⚠️ JobQueue no disponible.")
+
+    logger.info("🤖 Bot iniciado con todas las correcciones.")
+    app.run_polling()
 
 
 if __name__ == "__main__":
