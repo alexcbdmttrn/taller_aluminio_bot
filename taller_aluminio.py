@@ -180,25 +180,37 @@ async def crear_tablas():
             logger.warning(f"⚠️ Error creando tabla (puede que ya exista): {e}")
 
 
-# ==================== HISTORIAL EN POSTGRES ====================
-async def guardar_historial(chat_id: int, rol: str, contenido: str):
+# ==================== HISTORIAL EN POSTGRES (CORREGIDO) ====================
+async def guardar_historial(chat_id: int, mensaje: dict):
+    """
+    Guarda el mensaje COMPLETO (con 'tool_calls' o 'tool_call_id' si los tiene)
+    como JSON, para poder reconstruirlo exacto como lo necesita la API después.
+    """
     query = """
         INSERT INTO historial_chat (chat_id, rol, contenido)
         VALUES ($1, $2, $3)
     """
-    await ejecutar_query(query, (chat_id, rol, contenido))
+    await ejecutar_query(query, (chat_id, mensaje.get("role", "user"), json.dumps(mensaje)))
 
 
 async def obtener_historial(chat_id: int, limite: int = 12) -> List[Dict]:
+    """Obtiene los últimos mensajes y los reconstruye exactos desde JSON."""
     query = """
-        SELECT rol, contenido
+        SELECT contenido
         FROM historial_chat
         WHERE chat_id = $1
         ORDER BY fecha DESC
         LIMIT $2
     """
     resultados = await ejecutar_query(query, (chat_id, limite), fetch=True)
-    return [{"role": r["rol"], "content": r["contenido"]} for r in reversed(resultados)]
+    mensajes = []
+    for r in reversed(resultados):
+        try:
+            mensajes.append(json.loads(r["contenido"]))
+        except json.JSONDecodeError:
+            # Por si quedan filas viejas guardadas como texto plano
+            mensajes.append({"role": "assistant", "content": r["contenido"]})
+    return mensajes
 
 
 async def limpiar_historial(chat_id: int):
@@ -1050,7 +1062,9 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 
     chat_id = update.effective_chat.id
 
-    await guardar_historial(chat_id, "user", texto)
+    # Guardar mensaje del usuario (completo)
+    await guardar_historial(chat_id, {"role": "user", "content": texto})
+
     historial = await obtener_historial(chat_id, 15)
     historial_podado = podar_historial(historial)
 
@@ -1081,14 +1095,20 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         if not message.tool_calls:
             respuesta = message.content
             if respuesta:
-                await guardar_historial(chat_id, "assistant", respuesta)
+                await guardar_historial(chat_id, {"role": "assistant", "content": respuesta})
                 await update.message.reply_text(respuesta, parse_mode="Markdown")
             else:
                 await update.message.reply_text("No tengo respuesta para eso.")
             return
 
         tool_calls = message.tool_calls
-        await guardar_historial(chat_id, "assistant", json.dumps({"tool_calls": [tc.model_dump() for tc in tool_calls]}))
+        # Guardar el mensaje del asistente con tool_calls (completo)
+        mensaje_asistente = {
+            "role": "assistant",
+            "content": message.content,
+            "tool_calls": [tc.model_dump() for tc in tool_calls],
+        }
+        await guardar_historial(chat_id, mensaje_asistente)
 
         for tool_call in tool_calls:
             function_name = tool_call.function.name
@@ -1107,7 +1127,12 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                     logger.error(f"Error ejecutando tool {function_name}: {e}")
                     result = {"error": str(e)}
 
-            await guardar_historial(chat_id, "tool", json.dumps(result))
+            # Guardar el mensaje de tool con tool_call_id (completo)
+            await guardar_historial(chat_id, {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": json.dumps(result),
+            })
 
             if result.get("requiere_seleccion"):
                 opciones = result.get("opciones", [])
@@ -1179,11 +1204,17 @@ async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     try:
         result = await tool_func(**args_originales)
         chat_id = update.effective_chat.id
-        await guardar_historial(chat_id, "tool", json.dumps(result))
+
+        # Después de selección, guardamos el resultado como un mensaje de assistant
+        # (porque no hay un tool_call_id real, es una re-ejecución manual)
         if result.get("exito"):
-            await update.message.reply_text(f"✅ {result.get('mensaje', 'Acción completada.')}")
+            texto_resultado = f"✅ {result.get('mensaje', 'Acción completada.')}"
         else:
-            await update.message.reply_text(f"❌ {result.get('error', 'Error desconocido.')}")
+            texto_resultado = f"❌ {result.get('error', 'Error desconocido.')}"
+
+        await guardar_historial(chat_id, {"role": "assistant", "content": texto_resultado})
+        await update.message.reply_text(texto_resultado)
+
     except Exception as e:
         logger.error(f"Error ejecutando tool después de selección: {e}")
         await update.message.reply_text(f"❌ Error al ejecutar: {str(e)}")
@@ -1288,7 +1319,7 @@ def main():
     else:
         logger.warning("⚠️ JobQueue no disponible. Los recordatorios no se enviarán automáticamente. Instala `pip install python-telegram-bot[job-queue]`")
 
-    logger.info("🤖 Bot asíncrono con asyncpg, desambiguación de proyectos, historial en Postgres y correcciones de Claude iniciado.")
+    logger.info("🤖 Bot asíncrono con asyncpg, desambiguación de proyectos, historial en Postgres (corregido) y correcciones de Claude iniciado.")
     app.run_polling()
 
 if __name__ == "__main__":
