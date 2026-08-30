@@ -169,12 +169,13 @@ async def guardar_historial(chat_id: int, mensaje: dict):
     """
     await ejecutar_query(query, (chat_id, mensaje.get("role", "user"), json.dumps(mensaje)))
 
+# ==================== CAMBIO 3: Orden cronológico estricto ====================
 async def obtener_historial(chat_id: int, limite: int = 6) -> List[Dict]:
     query = """
         SELECT contenido
         FROM historial_chat
         WHERE chat_id = $1
-        ORDER BY fecha DESC
+        ORDER BY fecha DESC, id DESC
         LIMIT $2
     """
     resultados = await ejecutar_query(query, (chat_id, limite), fetch=True)
@@ -583,30 +584,25 @@ async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str
     await ejecutar_query(f"UPDATE clientes SET {', '.join(updates)} WHERE id = ${len(params)}", params)
     return {"exito": True, "mensaje": f"Datos actualizados correctamente para el cliente '{nombre_real}'."}
 
-# ===== RECORDATORIOS CORREGIDOS =====
+# ==================== RECORDATORIOS ====================
 def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], Optional[datetime]]:
     """Interpreta fechas informales y devuelve (fecha_normalizada, mensaje_ambiguedad, fecha_local)"""
     fecha_texto = fecha_texto.lower().strip()
     hoy = ahora_cdmx()
     fecha_actual = hoy.strftime("%Y-%m-%d")
-    
     texto = fecha_texto.replace("hoy", fecha_actual).replace("mañana", (hoy + timedelta(days=1)).strftime("%Y-%m-%d"))
     texto = re.sub(r'\ba\s*(?:las|la)\s*', '', texto)
     texto = re.sub(r'\bde\s+la\s+(?:mañana|tarde|noche)\b', '', texto)
     texto = re.sub(r'\bcon\b', '', texto)
     texto = re.sub(r'\bminutos?\b', '', texto)
     texto = re.sub(r'\bpara\b', '', texto)
-    
     numeros = re.findall(r'\d+', texto)
     if not numeros:
         return None, "No encontré una hora. Por favor, especifica la hora (ej. '2:30 AM').", None
-    
     es_manana = 'mañana' in fecha_texto
     es_tarde = 'tarde' in fecha_texto
     es_noche = 'noche' in fecha_texto
-    
     hora, minuto, segundo = None, 0, 0
-    
     if ' y ' in fecha_texto:
         partes = fecha_texto.split(' y ')
         if len(partes) >= 2:
@@ -634,10 +630,8 @@ def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], O
             elif len(nums) == 1:
                 hora = int(nums[0])
                 minuto = 0
-    
     if hora is None:
         return None, "No entendí la hora. Por favor, especifica una hora como '2:30' o '2 y 30'.", None
-    
     if es_manana:
         if hora == 12: hora = 0
     elif es_tarde or es_noche:
@@ -645,13 +639,10 @@ def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], O
     else:
         if hora < 6:
             return None, f"¿Quieres decir {hora:02d}:{minuto:02d} AM o {hora+12:02d}:{minuto:02d} PM?", None
-    
     if hora > 23: hora = 12
     if minuto > 59: minuto = 0
-    
     fecha_match = re.search(r'(\d{4}-\d{2}-\d{2})', texto)
     fecha_str = fecha_match.group(1) if fecha_match else fecha_actual
-    
     fecha_normalizada = f"{fecha_str} {hora:02d}:{minuto:02d}:{segundo:02d}"
     try:
         fecha_local = datetime.strptime(fecha_normalizada, "%Y-%m-%d %H:%M:%S")
@@ -666,12 +657,10 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
             if ambiguedad:
                 return {"exito": False, "error": ambiguedad}
             return {"exito": False, "error": f"⚠️ No pude interpretar la fecha: '{fecha_recordatorio}'. Por favor, especifica la fecha y hora (ej: hoy a las 12:59)."}
-        
         logger.info(f"📥 Fecha recibida: '{fecha_recordatorio}' -> interpretada: '{fecha_normalizada}'")
         fecha_utc = local_a_utc(fecha_local)
         ahora_utc = datetime.utcnow()
         diferencia = (fecha_utc - ahora_utc).total_seconds()
-        
         if diferencia < -120:
             fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
             fecha_manana = fecha_local + timedelta(days=1)
@@ -1063,7 +1052,7 @@ SYSTEM_PROMPT_BASE = (
     "NUNCA guardes un recordatorio sin confirmación explícita del usuario."
 )
 
-# ==================== PODA (MAX_HISTORIAL = 6) ====================
+# ==================== PODA ====================
 def podar_historial(messages: List[Dict]) -> List[Dict]:
     MAX_HISTORIAL = 6
     if len(messages) <= MAX_HISTORIAL:
@@ -1108,7 +1097,7 @@ def transcribir_audio_buffer(buffer: io.BytesIO) -> str:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-# ==================== PROCESAR MENSAJE (max_tokens=4000) ====================
+# ==================== PROCESAR MENSAJE (CON CAMBIOS 1 Y 2) ====================
 async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     try:
         if not texto:
@@ -1118,7 +1107,8 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         chat_id = update.effective_chat.id
         await guardar_historial(chat_id, {"role": "user", "content": texto})
 
-        historial = await obtener_historial(chat_id, 6)
+        # CAMBIO 2: obtener_historial con límite 20 (antes era 6)
+        historial = await obtener_historial(chat_id, 20)
         historial_podado = podar_historial(historial)
 
         fecha_actual = ahora_cdmx().strftime("%Y-%m-%d %H:%M")
@@ -1144,6 +1134,13 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                 logger.error(f"❌ Error real de DeepSeek: {error_msg}", exc_info=True)
                 if "maximum context length" in error_msg.lower() or "token" in error_msg.lower():
                     await update.message.reply_text("⚠️ La conversación es muy larga. Por favor, escribe /start para reiniciar y limpiar la memoria.")
+                elif "tool_calls must be followed by tool" in error_msg.lower() or "400" in error_msg:
+                    logger.warning("🧹 Historial corrupto detectado. Limpiando automáticamente...")
+                    await limpiar_historial(chat_id)
+                    await update.message.reply_text(
+                        "⚠️ Detecté un error en mi memoria y la limpié automáticamente. "
+                        "Por favor, repite tu última petición, jefe."
+                    )
                 else:
                     await update.message.reply_text(f"❌ Error de conexión con la IA: {error_msg[:100]}")
                 context.user_data["confirmacion_pendiente"] = None
@@ -1161,6 +1158,8 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                 return
 
             tool_calls = message.tool_calls
+
+            # Intercepción: editar sin ID -> crear
             for tool_call in tool_calls:
                 if tool_call.function.name == "tool_editar_recordatorio":
                     args = json.loads(tool_call.function.arguments)
@@ -1186,7 +1185,8 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
             }
             await guardar_historial(chat_id, mensaje_asistente)
 
-            for tool_call in tool_calls:
+            # CAMBIO 1: Enumerar tool_calls para rellenar huérfanos
+            for i, tool_call in enumerate(tool_calls):
                 function_name = tool_call.function.name
                 function_args = json.loads(tool_call.function.arguments)
 
@@ -1208,6 +1208,22 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                     "tool_call_id": tool_call.id,
                     "content": json.dumps(result),
                 })
+
+                # CAMBIO 1: Rellenar llamadas restantes para evitar huérfanos
+                necesita_salir = (
+                    (result.get("exito") is False and "requiere_confirmacion" not in result and "requiere_seleccion" not in result) or
+                    result.get("requiere_confirmacion") or
+                    result.get("requiere_seleccion")
+                )
+
+                if necesita_salir:
+                    # Rellenar las llamadas restantes para que no queden huérfanas en la API
+                    for remaining_tool in tool_calls[i+1:]:
+                        await guardar_historial(chat_id, {
+                            "role": "tool",
+                            "tool_call_id": remaining_tool.id,
+                            "content": json.dumps({"exito": False, "error": "Acción cancelada. Se requiere interacción previa."})
+                        })
 
                 if result.get("exito") is False and "requiere_confirmacion" not in result and "requiere_seleccion" not in result:
                     await update.message.reply_text(f"❌ {result.get('error', 'Error desconocido.')}")
@@ -1234,8 +1250,8 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                 if result.get("requiere_seleccion"):
                     opciones = result.get("opciones", [])
                     mensaje_opciones = f"{result.get('error', '')}\n\n"
-                    for i, opcion in enumerate(opciones, 1):
-                        mensaje_opciones += f"{i}. {opcion}\n"
+                    for idx_opcion, opcion in enumerate(opciones, 1):
+                        mensaje_opciones += f"{idx_opcion}. {opcion}\n"
                     mensaje_opciones += "\nResponde con el nombre exacto del proyecto o el número."
                     await update.message.reply_text(mensaje_opciones, parse_mode="Markdown")
                     context.user_data["esperando_seleccion"] = {
@@ -1246,11 +1262,13 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                     }
                     return
 
-            historial = await obtener_historial(chat_id, 6)
+            # CAMBIO 2: obtener_historial con límite 20 (antes era 6)
+            historial = await obtener_historial(chat_id, 20)
             historial_podado = podar_historial(historial)
             mensajes_api = [system_msg] + historial_podado
 
         await update.message.reply_text("Lo siento, no pude procesar tu solicitud. ¿Puedes reformularla con más claridad?")
+
     except Exception as e:
         logger.error(f"❌ Error inesperado en procesar_mensaje: {e}", exc_info=True)
         try:
@@ -1258,7 +1276,7 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         except:
             pass
 
-# ==================== MANEJO DE CONFIRMACIÓN (CORREGIDO) ====================
+# ==================== MANEJO DE CONFIRMACIÓN ====================
 async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     try:
         confirmacion = context.user_data.get("confirmacion_pendiente")
@@ -1287,6 +1305,7 @@ async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYP
                 return True
 
             fecha_utc = local_a_utc(nueva_fecha_local)
+
             if es_manana:
                 nueva_fecha_local = nueva_fecha_local + timedelta(days=1)
                 fecha_utc = local_a_utc(nueva_fecha_local)
@@ -1302,12 +1321,14 @@ async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYP
             mensaje_respuesta = f"✅ Recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje_original}*"
             await guardar_historial(chat_id, {"role": "assistant", "content": mensaje_respuesta})
             await update.message.reply_text(mensaje_respuesta)
+
             context.user_data["confirmacion_pendiente"] = None
             return True
         else:
             context.user_data["confirmacion_pendiente"] = None
             await update.message.reply_text("❌ Recordatorio cancelado.")
             return True
+
     except Exception as e:
         logger.error(f"❌ Error en manejar_confirmacion: {e}", exc_info=True)
         await update.message.reply_text("⚠️ Error procesando la confirmación. Intenta de nuevo.")
@@ -1324,7 +1345,6 @@ async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         tool_name = seleccion_data["tool_name"]
         args_originales = seleccion_data["args_originales"]
         opciones = seleccion_data["opciones"]
-
         seleccionado = None
         texto_limpio = texto.strip().lower()
 
@@ -1363,26 +1383,24 @@ async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         try:
             result = await tool_func(**args_originales)
             chat_id = update.effective_chat.id
-
             if result.get("exito"):
                 texto_resultado = f"✅ {result.get('mensaje', 'Acción completada.')}"
             else:
                 texto_resultado = f"❌ {result.get('error', 'Error desconocido.')}"
-
             await guardar_historial(chat_id, {"role": "assistant", "content": texto_resultado})
             await update.message.reply_text(texto_resultado)
-
         except Exception as e:
             logger.error(f"Error ejecutando tool después de selección: {e}")
             await update.message.reply_text(f"❌ Error al ejecutar: {str(e)}")
 
         return True
+
     except Exception as e:
         logger.error(f"❌ Error en manejar_seleccion: {e}", exc_info=True)
         await update.message.reply_text("⚠️ Error procesando la selección. Intenta de nuevo.")
         return True
 
-# ==================== MANEJADORES CON VÁLVULA DE ESCAPE ====================
+# ==================== MANEJADORES ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
@@ -1451,9 +1469,9 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Error manejando audio: {e}")
                 await update.message.reply_text("❌ Error al procesar el audio. Intenta de nuevo.")
+
     except Exception as e:
         logger.error(f"❌ Error en handler: {e}", exc_info=True)
-        # Limpiar estado en caso de error
         context.user_data["confirmacion_pendiente"] = None
         context.user_data["esperando_seleccion"] = None
         try:
@@ -1507,7 +1525,7 @@ def main():
     else:
         logger.warning("⚠️ JobQueue no disponible. Instala python-telegram-bot[job-queue] para recordatorios automáticos.")
 
-    logger.info("🤖 Bot iniciado con todas las correcciones (ISO format, SQL typo, MAX_HISTORIAL=6, max_tokens=4000).")
+    logger.info("🤖 Bot iniciado con correcciones anti-huérfanos, orden cronológico estricto y límite de historial=20.")
     app.run_polling()
 
 if __name__ == "__main__":
