@@ -1005,17 +1005,21 @@ TOOL_FUNCTIONS = {
 }
 
 
-# ==================== PROMPT DEL SISTEMA ====================
+# ==================== PROMPT DEL SISTEMA (ACTUALIZADO CON REGLAS ESTRICTAS PARA RECORDATORIOS) ====================
 SYSTEM_PROMPT_BASE = (
     "Eres el asistente de gestión de proyectos de un taller de aluminio. "
     "Tu tarea es ayudar a registrar datos, consultar materiales y administrar pagos. "
     "No asumas información. Si el usuario te pide registrar un gasto o un pago, pero falta la cantidad, el concepto o el proyecto, PREGÚNTALE en lenguaje natural antes de ejecutar la herramienta. "
     "Solo ejecuta herramientas de base de datos cuando tengas toda la información requerida explícita en la conversación. "
-    "Si el usuario te insiste en ejecutar una acción, vuelve a utilizar la herramienta correspondiente, ignorando fallos previos. "
+    "Si el usuario te insiste en ejecutar una acción, vuelve a utilizar la herramienta correspondiente, ignorando fallos previos en la base de datos. No te excusas con errores pasados si el usuario te pide explícitamente que lo intentes de nuevo. "
     "Habla de forma directa y clara, usando 'jefe' o 'patrón' ocasionalmente. "
     "Cuando muestres listas, preséntalas de manera ordenada, con emojis para facilitar la lectura. "
-    "Si el usuario pide borrar algo, siempre pregunta confirmación primero. "
-    "Si una herramienta devuelve 'requiere_seleccion': true, NO insistas ni adivines: muéstrale al jefe las opciones y pregúntale cuál es. Cuando el jefe responda, vuelve a llamar la MISMA herramienta pasando el 'nombre_corto' exacto del proyecto que eligió."
+    "Si el usuario pide borrar algo, siempre pregunta confirmación primero, y solo ejecuta la herramienta cuando el usuario confirme explícitamente. "
+    # ===== NUEVAS REGLAS ESTRICTAS PARA RECORDATORIOS =====
+    "REGLA ESTRICTA PARA RECORDATORIOS: Cada vez que el usuario te pida que le recuerdes algo (ej. 'recuérdame a las X...', 'pon un aviso...'), DEBES SIEMPRE crear un registro NUEVO usando tool_crear_recordatorio. "
+    "NUNCA asumas que quiere modificar un recordatorio anterior solo por el contexto de la plática. "
+    "ÚNICAMENTE vas a usar tool_editar_recordatorio si el usuario utiliza verbos explícitos de cambio como 'edita', 'cambia', 'modifica' o 'mueve' un recordatorio. "
+    "Si el usuario pide editar o borrar, ejecuta PRIMERO tool_consultar_recordatorios de forma silenciosa para encontrar el ID correcto. Si el usuario no especifica cuál, muéstrale la lista de pendientes y pídele el ID."
 )
 
 
@@ -1331,7 +1335,7 @@ def main():
     else:
         logger.warning("⚠️ JobQueue no disponible. Los recordatorios no se enviarán automáticamente. Instala `pip install python-telegram-bot[job-queue]`")
 
-    logger.info("🤖 Bot asíncrono con asyncpg, desambiguación de proyectos, historial en Postgres (con blindaje anti-corrupción) y correcciones de Claude iniciado.")
+    logger.info("🤖 Bot asíncrono con asyncpg, desambiguación de proyectos, historial en Postgres (con blindaje anti-corrupción) y reglas estrictas para recordatorios iniciado.")
     app.run_polling()
 
 
