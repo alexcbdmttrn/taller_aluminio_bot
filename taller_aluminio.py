@@ -180,7 +180,7 @@ async def crear_tablas():
             logger.warning(f"⚠️ Error creando tabla (puede que ya exista): {e}")
 
 
-# ==================== HISTORIAL EN POSTGRES (CORREGIDO) ====================
+# ==================== HISTORIAL EN POSTGRES (CORREGIDO + BLINDAJE) ====================
 async def guardar_historial(chat_id: int, mensaje: dict):
     """
     Guarda el mensaje COMPLETO (con 'tool_calls' o 'tool_call_id' si los tiene)
@@ -194,7 +194,11 @@ async def guardar_historial(chat_id: int, mensaje: dict):
 
 
 async def obtener_historial(chat_id: int, limite: int = 12) -> List[Dict]:
-    """Obtiene los últimos mensajes y los reconstruye exactos desde JSON."""
+    """
+    Obtiene los últimos mensajes y los reconstruye exactos desde JSON.
+    Descarta automáticamente mensajes mal formados (sin 'role') para
+    que filas viejas corruptas no rompan la conversación.
+    """
     query = """
         SELECT contenido
         FROM historial_chat
@@ -206,10 +210,18 @@ async def obtener_historial(chat_id: int, limite: int = 12) -> List[Dict]:
     mensajes = []
     for r in reversed(resultados):
         try:
-            mensajes.append(json.loads(r["contenido"]))
+            m = json.loads(r["contenido"])
         except json.JSONDecodeError:
             # Por si quedan filas viejas guardadas como texto plano
-            mensajes.append({"role": "assistant", "content": r["contenido"]})
+            m = {"role": "assistant", "content": r["contenido"]}
+
+        # BLINDAJE EXTRA: si el mensaje no tiene 'role', se descarta
+        if not isinstance(m, dict) or "role" not in m:
+            logger.warning(f"Fila de historial descartada por formato inválido: {m}")
+            continue
+
+        mensajes.append(m)
+
     return mensajes
 
 
@@ -1319,8 +1331,9 @@ def main():
     else:
         logger.warning("⚠️ JobQueue no disponible. Los recordatorios no se enviarán automáticamente. Instala `pip install python-telegram-bot[job-queue]`")
 
-    logger.info("🤖 Bot asíncrono con asyncpg, desambiguación de proyectos, historial en Postgres (corregido) y correcciones de Claude iniciado.")
+    logger.info("🤖 Bot asíncrono con asyncpg, desambiguación de proyectos, historial en Postgres (con blindaje anti-corrupción) y correcciones de Claude iniciado.")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
