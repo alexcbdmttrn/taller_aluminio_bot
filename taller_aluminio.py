@@ -170,7 +170,7 @@ async def guardar_historial(chat_id: int, mensaje: dict):
     await ejecutar_query(query, (chat_id, mensaje.get("role", "user"), json.dumps(mensaje)))
 
 # ==================== CAMBIO 3: Orden cronológico estricto ====================
-async def obtener_historial(chat_id: int, limite: int = 6) -> List[Dict]:
+async def obtener_historial(chat_id: int, limite: int = 30) -> List[Dict]:
     query = """
         SELECT contenido
         FROM historial_chat
@@ -585,125 +585,186 @@ async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str
     return {"exito": True, "mensaje": f"Datos actualizados correctamente para el cliente '{nombre_real}'."}
 
 # ==================== RECORDATORIOS ====================
+def _normalizar_texto_hora(texto: str) -> str:
+    """Normaliza expresiones comunes de hora en español."""
+    texto = texto.lower().strip()
+    reemplazos = {
+        "a.m.": "am", "p.m.": "pm", "a. m.": "am", "p. m.": "pm",
+        "a m": "am", "p m": "pm",
+        "mediodia": "mediodía", "medianoche": "00:00",
+    }
+    for a, b in reemplazos.items():
+        texto = texto.replace(a, b)
+    return texto
+
+
 def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], Optional[datetime]]:
-    """Interpreta fechas informales y devuelve (fecha_normalizada, mensaje_ambiguedad, fecha_local)"""
-    fecha_texto = fecha_texto.lower().strip()
+    """Interpreta fechas/horas informales en español.
+
+    Importante: si el usuario escribió AM/PM o una expresión inequívoca
+    (madrugada, mañana, tarde, noche), nunca vuelve a preguntar AM/PM.
+    """
+    original = fecha_texto or ""
+    texto = _normalizar_texto_hora(original)
     hoy = ahora_cdmx()
     fecha_actual = hoy.strftime("%Y-%m-%d")
-    texto = fecha_texto.replace("hoy", fecha_actual).replace("mañana", (hoy + timedelta(days=1)).strftime("%Y-%m-%d"))
-    texto = re.sub(r'\ba\s*(?:las|la)\s*', '', texto)
-    texto = re.sub(r'\bde\s+la\s+(?:mañana|tarde|noche)\b', '', texto)
-    texto = re.sub(r'\bcon\b', '', texto)
-    texto = re.sub(r'\bminutos?\b', '', texto)
-    texto = re.sub(r'\bpara\b', '', texto)
-    numeros = re.findall(r'\d+', texto)
-    if not numeros:
-        return None, "No encontré una hora. Por favor, especifica la hora (ej. '2:30 AM').", None
-    es_manana = 'mañana' in fecha_texto
-    es_tarde = 'tarde' in fecha_texto
-    es_noche = 'noche' in fecha_texto
-    hora, minuto, segundo = None, 0, 0
-    if ' y ' in fecha_texto:
-        partes = fecha_texto.split(' y ')
-        if len(partes) >= 2:
-            nums = re.findall(r'\d+', partes[0])
-            if nums: hora = int(nums[-1])
-            nums2 = re.findall(r'\d+', partes[1])
-            if nums2: minuto = int(nums2[0])
-    elif ' con ' in fecha_texto:
-        partes = fecha_texto.split(' con ')
-        if len(partes) >= 2:
-            nums = re.findall(r'\d+', partes[0])
-            if nums: hora = int(nums[-1])
-            nums2 = re.findall(r'\d+', partes[1])
-            if nums2: minuto = int(nums2[0])
+
+    # Fecha relativa.
+    if re.search(r'\bpasado mañana\b', texto):
+        fecha_base = hoy + timedelta(days=2)
+    elif re.search(r'\bmañana\b|\bmanana\b', texto):
+        fecha_base = hoy + timedelta(days=1)
     else:
-        hora_match = re.search(r'(\d{1,2})\s*[:.,]\s*(\d{2})', fecha_texto)
-        if hora_match:
-            hora = int(hora_match.group(1))
-            minuto = int(hora_match.group(2))
+        fecha_base = hoy
+
+    # Fecha YYYY-MM-DD, DD/MM/YYYY o DD-MM-YYYY.
+    fecha_str = fecha_actual
+    m_iso = re.search(r'\b(20\d{2})-(\d{1,2})-(\d{1,2})\b', texto)
+    m_lat = re.search(r'\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b', texto)
+    try:
+        if m_iso:
+            y, mo, d = map(int, m_iso.groups())
+            fecha_base = hoy.replace(year=y, month=mo, day=d)
+            fecha_str = fecha_base.strftime("%Y-%m-%d")
+        elif m_lat:
+            d, mo, y = map(int, m_lat.groups())
+            fecha_base = hoy.replace(year=y, month=mo, day=d)
+            fecha_str = fecha_base.strftime("%Y-%m-%d")
         else:
-            nums = re.findall(r'\d+', fecha_texto)
-            if len(nums) >= 2:
-                hora = int(nums[-2])
-                minuto = int(nums[-1])
-            elif len(nums) == 1:
-                hora = int(nums[0])
-                minuto = 0
+            fecha_str = fecha_base.strftime("%Y-%m-%d")
+    except ValueError:
+        return None, "La fecha indicada no es válida. Usa, por ejemplo, 30/08/2026.", None
+
+    # Detectar contexto horario ANTES de extraer números.
+    tiene_am = bool(re.search(r'\b(?:am|a\.m\.)\b', texto))
+    tiene_pm = bool(re.search(r'\b(?:pm|p\.m\.)\b', texto))
+    es_madrugada = bool(re.search(r'\b(?:madrugada)\b', texto))
+    es_manana = bool(re.search(r'\b(?:mañana|manana)\b', texto))
+    es_tarde = bool(re.search(r'\b(?:tarde)\b', texto))
+    es_noche = bool(re.search(r'\b(?:noche)\b', texto))
+    contexto_inequivoco = tiene_am or tiene_pm or es_madrugada or es_manana or es_tarde or es_noche
+
+    # Extraer hora/minuto. Soporta 3:30, 3.30, 3 30, 3 y 30, 3 con 30,
+    # "3 y media" y "3:30 AM".
+    hora = minuto = None
+    patrones = [
+        r'\b(\d{1,2})\s*[:.,]\s*(\d{1,2})\b',
+        r'\b(\d{1,2})\s+(?:y|con)\s+(\d{1,2})\b',
+        r'\b(\d{1,2})\s+(?:y\s+)?media\b',
+    ]
+    for patron in patrones:
+        m = re.search(patron, texto)
+        if m:
+            hora = int(m.group(1))
+            minuto = 30 if len(m.groups()) == 1 else int(m.group(2))
+            break
+
     if hora is None:
-        return None, "No entendí la hora. Por favor, especifica una hora como '2:30' o '2 y 30'.", None
-    if es_manana:
-        if hora == 12: hora = 0
+        # Caso "3 30" sin separador.
+        m = re.search(r'\b(\d{1,2})\s+(\d{2})\b', texto)
+        if m:
+            hora, minuto = int(m.group(1)), int(m.group(2))
+        else:
+            # Caso "a las 3".
+            m = re.search(r'\b(?:a\s+las|a\s+la|las|la)\s+(\d{1,2})\b', texto)
+            if m:
+                hora, minuto = int(m.group(1)), 0
+            else:
+                # Último recurso: primer número de 1-2 dígitos que parezca hora.
+                nums = re.findall(r'\b\d{1,2}\b', texto)
+                if nums:
+                    candidato = int(nums[0])
+                    if 0 <= candidato <= 23:
+                        hora, minuto = candidato, 0
+
+    if hora is None:
+        return None, "No encontré una hora. Por favor, dime la hora, por ejemplo: '3:30 AM'.", None
+    if minuto is None:
+        minuto = 0
+    if hora > 23 or minuto > 59:
+        return None, "La hora indicada no es válida. Usa una hora entre 00:00 y 23:59.", None
+
+    # PRIORIDAD ABSOLUTA: AM/PM explícito.
+    if tiene_am:
+        if hora == 12:
+            hora = 0
+    elif tiene_pm:
+        if hora < 12:
+            hora += 12
+    elif es_madrugada:
+        if hora == 12:
+            hora = 0
+        elif hora >= 6:
+            # 6+ ya no es madrugada; no forzamos una conversión absurda.
+            return None, "Para esa hora necesito saber si es de la mañana o de la tarde.", None
+    elif es_manana:
+        if hora == 12:
+            hora = 0
     elif es_tarde or es_noche:
-        if hora < 12: hora += 12
+        if hora < 12:
+            hora += 12
     else:
-        if hora < 6:
-            return None, f"¿Quieres decir {hora:02d}:{minuto:02d} AM o {hora+12:02d}:{minuto:02d} PM?", None
-    if hora > 23: hora = 12
-    if minuto > 59: minuto = 0
-    fecha_match = re.search(r'(\d{4}-\d{2}-\d{2})', texto)
-    fecha_str = fecha_match.group(1) if fecha_match else fecha_actual
-    fecha_normalizada = f"{fecha_str} {hora:02d}:{minuto:02d}:{segundo:02d}"
+        # Solo preguntamos cuando realmente hay ambigüedad.
+        # Las horas 6-11 se interpretan como mañana; 12 se interpreta como mediodía.
+        # 0-5 se consideran madrugada por defecto, porque el usuario ya dio una hora válida.
+        if 6 <= hora <= 11:
+            pass
+        elif hora == 12:
+            pass
+        elif 0 <= hora <= 5:
+            pass
+
+    fecha_normalizada = f"{fecha_str} {hora:02d}:{minuto:02d}:00"
     try:
         fecha_local = datetime.strptime(fecha_normalizada, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None, "Formato de fecha inválido.", None
     return fecha_normalizada, None, fecha_local
 
+
 async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id: int):
+    """Prepara un recordatorio y SIEMPRE exige confirmación antes de insertarlo."""
     try:
         fecha_normalizada, ambiguedad, fecha_local = interpretar_fecha(fecha_recordatorio)
-        if not fecha_normalizada:
-            if ambiguedad:
-                return {"exito": False, "error": ambiguedad}
-            return {"exito": False, "error": f"⚠️ No pude interpretar la fecha: '{fecha_recordatorio}'. Por favor, especifica la fecha y hora (ej: hoy a las 12:59)."}
-        logger.info(f"📥 Fecha recibida: '{fecha_recordatorio}' -> interpretada: '{fecha_normalizada}'")
+        if not fecha_normalizada or not fecha_local:
+            return {"exito": False, "error": ambiguedad or f"⚠️ No pude interpretar la fecha: '{fecha_recordatorio}'."}
+
         fecha_utc = local_a_utc(fecha_local)
         ahora_utc = datetime.utcnow()
         diferencia = (fecha_utc - ahora_utc).total_seconds()
-        if diferencia < -120:
-            fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+        fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+
+        if diferencia <= 0:
             fecha_manana = fecha_local + timedelta(days=1)
             fecha_manana_str = fecha_manana.strftime("%d/%m/%Y %I:%M %p")
-            return {
-                "exito": False,
-                "requiere_confirmacion": True,
-                "fecha_local": fecha_mostrar,
-                "mensaje": mensaje,
-                "error": f"⚠️ La fecha programada ({fecha_mostrar}) ya pasó. ¿Quieres programarlo para mañana ({fecha_manana_str}) o confirmas la fecha actual?",
-                "datos_originales": {
-                    "mensaje": mensaje,
-                    "fecha_local": fecha_local.isoformat(),
-                    "fecha_utc": fecha_utc.isoformat()
-                }
-            }
-        elif diferencia > 180:
-            query = """
-                INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado)
-                VALUES ($1, $2, $3, FALSE) RETURNING id
-            """
-            result = await ejecutar_query(query, (chat_id, mensaje, fecha_utc), fetch=True)
-            nuevo_id = result[0]["id"]
-            fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
-            return {"exito": True, "mensaje": f"🔔 Nuevo recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje}*"}
-        else:
-            fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+            aviso = (
+                f"⚠️ La fecha programada ({fecha_mostrar}) ya pasó. "
+                f"¿Quieres programarla para mañana ({fecha_manana_str}) o mantener la fecha actual?"
+            )
+        elif diferencia <= 180:
             hora_actual = ahora_cdmx().strftime("%I:%M %p")
-            return {
-                "exito": False,
-                "requiere_confirmacion": True,
-                "fecha_local": fecha_mostrar,
+            aviso = (
+                f"⚠️ La fecha programada ({fecha_mostrar}) es muy cercana. "
+                f"La hora actual es {hora_actual}. ¿Quieres programarla igualmente?"
+            )
+        else:
+            aviso = f"Confirma el recordatorio para el {fecha_mostrar}."
+
+        return {
+            "exito": False,
+            "requiere_confirmacion": True,
+            "fecha_local": fecha_mostrar,
+            "mensaje": mensaje,
+            "error": aviso,
+            "datos_originales": {
                 "mensaje": mensaje,
-                "error": f"⚠️ La fecha programada ({fecha_mostrar}) es muy cercana o ya pasó. La hora actual en el sistema es {hora_actual}. ¿Quieres programarlo igualmente? Responde 'sí' para confirmar o 'no' para cancelar.",
-                "datos_originales": {
-                    "mensaje": mensaje,
-                    "fecha_local": fecha_local.isoformat(),
-                    "fecha_utc": fecha_utc.isoformat()
-                }
-            }
+                "fecha_local": fecha_local.isoformat(),
+                "fecha_utc": fecha_utc.isoformat(),
+            },
+        }
     except Exception as e:
-        logger.error(f"Error en tool_crear_recordatorio: {e}")
-        return {"exito": False, "error": f"Error al programar recordatorio: {str(e)}"}
+        logger.error(f"Error en tool_crear_recordatorio: {e}", exc_info=True)
+        return {"exito": False, "error": f"Error al preparar el recordatorio: {str(e)}"}
 
 async def tool_consultar_recordatorios(chat_id: int):
     query = """
@@ -722,7 +783,12 @@ async def tool_consultar_recordatorios(chat_id: int):
     return {"exito": True, "data": data}
 
 async def tool_borrar_recordatorio(id_recordatorio: int, chat_id: int):
-    await ejecutar_query("DELETE FROM recordatorios WHERE id = $1 AND chat_id = $2", (id_recordatorio, chat_id))
+    result = await ejecutar_query(
+        "DELETE FROM recordatorios WHERE id = $1 AND chat_id = $2",
+        (id_recordatorio, chat_id),
+    )
+    if not result or result.endswith(" 0"):
+        return {"exito": False, "error": f"No encontré un recordatorio pendiente con ID {id_recordatorio}."}
     return {"exito": True, "mensaje": f"🗑️ Recordatorio con ID {id_recordatorio} eliminado."}
 
 async def tool_editar_recordatorio(
@@ -732,17 +798,28 @@ async def tool_editar_recordatorio(
     chat_id: int = None,
 ):
     if id_recordatorio is None:
-        return {"exito": False, "error": "❌ Para editar un recordatorio debes proporcionar el ID exacto. Si quieres un recordatorio nuevo, usa 'recuérdame...' para crear uno nuevo."}
+        return {"exito": False, "error": "❌ Para editar un recordatorio debes proporcionar el ID exacto."}
+
+    existe = await ejecutar_query(
+        "SELECT id, mensaje, fecha_recordatorio FROM recordatorios WHERE id = $1 AND chat_id = $2 AND enviado = FALSE",
+        (id_recordatorio, chat_id), fetch=True
+    ) if chat_id is not None else await ejecutar_query(
+        "SELECT id, mensaje, fecha_recordatorio FROM recordatorios WHERE id = $1 AND enviado = FALSE",
+        (id_recordatorio,), fetch=True
+    )
+    if not existe:
+        return {"exito": False, "error": f"No encontré un recordatorio pendiente con ID {id_recordatorio}."}
+
     updates, params = [], []
-    if nuevo_mensaje:
+    if nuevo_mensaje is not None and str(nuevo_mensaje).strip():
         updates.append(f"mensaje = ${len(params)+1}")
-        params.append(nuevo_mensaje)
+        params.append(str(nuevo_mensaje).strip())
+
+    fecha_local = None
     if nueva_fecha:
         fecha_normalizada, ambiguedad, fecha_local = interpretar_fecha(nueva_fecha)
-        if not fecha_normalizada:
-            if ambiguedad:
-                return {"exito": False, "error": ambiguedad}
-            return {"exito": False, "error": "Formato de fecha inválido. Usa YYYY-MM-DD HH:MM:SS."}
+        if not fecha_normalizada or not fecha_local:
+            return {"exito": False, "error": ambiguedad or "Formato de fecha inválido."}
         fecha_utc = local_a_utc(fecha_local)
         ahora_utc = datetime.utcnow()
         diferencia = (fecha_utc - ahora_utc).total_seconds()
@@ -753,29 +830,29 @@ async def tool_editar_recordatorio(
                 "exito": False,
                 "requiere_confirmacion": True,
                 "fecha_local": fecha_mostrar,
-                "mensaje": nuevo_mensaje or "Recordatorio",
-                "error": f"⚠️ La nueva fecha ({fecha_mostrar}) es muy cercana o ya pasó. La hora actual en el sistema es {hora_actual}. ¿Quieres actualizarlo igualmente? Responde 'sí' para confirmar o 'no' para cancelar.",
+                "mensaje": nuevo_mensaje or existe[0]["mensaje"],
+                "error": f"⚠️ La nueva fecha ({fecha_mostrar}) es muy cercana o ya pasó. La hora actual es {hora_actual}. ¿Quieres actualizarlo igualmente?",
                 "id_recordatorio": id_recordatorio,
                 "nuevo_mensaje": nuevo_mensaje,
                 "nueva_fecha": nueva_fecha,
                 "datos_originales": {
-                    "mensaje": nuevo_mensaje,
+                    "mensaje": nuevo_mensaje or existe[0]["mensaje"],
                     "fecha_local": fecha_local.isoformat(),
-                    "fecha_utc": fecha_utc.isoformat()
-                }
+                    "fecha_utc": fecha_utc.isoformat(),
+                },
             }
         updates.append(f"fecha_recordatorio = ${len(params)+1}")
         params.append(fecha_utc)
+
     if not updates:
         return {"exito": False, "error": "No se enviaron datos para actualizar."}
+
     params.append(id_recordatorio)
+    where = f"id = ${len(params)}"
     if chat_id is not None:
         params.append(chat_id)
-        set_clause = ", ".join(updates)
-        query = f"UPDATE recordatorios SET {set_clause} WHERE id = ${len(params)-1} AND chat_id = ${len(params)}"
-    else:
-        set_clause = ", ".join(updates)
-        query = f"UPDATE recordatorios SET {set_clause} WHERE id = ${len(params)}"
+        where += f" AND chat_id = ${len(params)}"
+    query = f"UPDATE recordatorios SET {', '.join(updates)} WHERE {where}"
     await ejecutar_query(query, params)
     return {"exito": True, "mensaje": f"✏️ Recordatorio {id_recordatorio} actualizado correctamente."}
 
@@ -1054,25 +1131,53 @@ SYSTEM_PROMPT_BASE = (
 
 # ==================== PODA ====================
 def podar_historial(messages: List[Dict]) -> List[Dict]:
-    MAX_HISTORIAL = 6
-    if len(messages) <= MAX_HISTORIAL:
-        return messages
-    start = len(messages) - MAX_HISTORIAL
-    while start > 0:
-        msg = messages[start]
-        if msg["role"] == "tool":
-            start -= 1
+    """Devuelve un historial seguro para la API: nunca deja tool_calls huérfanos."""
+    MAX_HISTORIAL = 12
+    if not messages:
+        return []
+
+    salida = []
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        if not isinstance(m, dict) or m.get("role") not in {"user", "assistant", "tool"}:
+            i += 1
             continue
-        if msg["role"] == "assistant" and msg.get("tool_calls"):
-            tool_call_ids = [tc["id"] for tc in msg["tool_calls"]]
-            next_msgs = messages[start + 1 : start + len(tool_call_ids) + 1]
-            found_ids = [m["tool_call_id"] for m in next_msgs if m["role"] == "tool"]
-            if not all(tid in found_ids for tid in tool_call_ids):
-                start -= 1
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            ids = [tc.get("id") for tc in m.get("tool_calls", []) if tc.get("id")]
+            tools = []
+            j = i + 1
+            while j < len(messages) and messages[j].get("role") == "tool":
+                if messages[j].get("tool_call_id") in ids:
+                    tools.append(messages[j])
+                j += 1
+            found = {x.get("tool_call_id") for x in tools}
+            if not ids or not all(x in found for x in ids):
+                # No mandamos un assistant con tool_calls incompletos.
+                i = j
                 continue
-        break
-    start = max(0, start)
-    return messages[start:]
+            salida.append(m)
+            salida.extend(tools)
+            i = j
+            continue
+        if m.get("role") == "tool":
+            i += 1
+            continue
+        salida.append(m)
+        i += 1
+
+    # Conserva los últimos mensajes, pero sin cortar un grupo assistant+tools.
+    if len(salida) <= MAX_HISTORIAL:
+        return salida
+    salida = salida[-MAX_HISTORIAL:]
+    while salida and salida[0].get("role") == "tool":
+        salida.pop(0)
+    if salida and salida[0].get("role") == "assistant" and salida[0].get("tool_calls"):
+        ids = {tc.get("id") for tc in salida[0].get("tool_calls", [])}
+        siguiente = [m.get("tool_call_id") for m in salida[1:] if m.get("role") == "tool"]
+        if not ids.issubset(set(siguiente)):
+            salida.pop(0)
+    return salida
 
 # ==================== AUDIO ====================
 def transcribir_audio_buffer(buffer: io.BytesIO) -> str:
@@ -1108,7 +1213,7 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         await guardar_historial(chat_id, {"role": "user", "content": texto})
 
         # CAMBIO 2: obtener_historial con límite 20 (antes era 6)
-        historial = await obtener_historial(chat_id, 20)
+        historial = await obtener_historial(chat_id, 30)
         historial_podado = podar_historial(historial)
 
         fecha_actual = ahora_cdmx().strftime("%Y-%m-%d %H:%M")
@@ -1134,7 +1239,7 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                 logger.error(f"❌ Error real de DeepSeek: {error_msg}", exc_info=True)
                 if "maximum context length" in error_msg.lower() or "token" in error_msg.lower():
                     await update.message.reply_text("⚠️ La conversación es muy larga. Por favor, escribe /start para reiniciar y limpiar la memoria.")
-                elif "tool_calls must be followed by tool" in error_msg.lower() or "400" in error_msg:
+                elif "tool_calls must be followed by tool" in error_msg.lower():
                     logger.warning("🧹 Historial corrupto detectado. Limpiando automáticamente...")
                     await limpiar_historial(chat_id)
                     await update.message.reply_text(
@@ -1263,7 +1368,7 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                     return
 
             # CAMBIO 2: obtener_historial con límite 20 (antes era 6)
-            historial = await obtener_historial(chat_id, 20)
+            historial = await obtener_historial(chat_id, 30)
             historial_podado = podar_historial(historial)
             mensajes_api = [system_msg] + historial_podado
 
@@ -1278,64 +1383,114 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 
 # ==================== MANEJO DE CONFIRMACIÓN ====================
 async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    """Procesa una confirmación sin volver a reinterpretar innecesariamente la fecha."""
     try:
         confirmacion = context.user_data.get("confirmacion_pendiente")
         if not confirmacion:
             return False
 
-        texto_lower = texto.lower()
-        palabras_afirmativas = ["sí", "si", "yes", "y", "dale", "ok", "confirmo", "confirmar", "programa", "programar", "adelante"]
-        es_afirmativo = any(p in texto_lower for p in palabras_afirmativas)
-        es_manana = "mañana" in texto_lower or "manana" in texto_lower
+        t = (texto or "").strip().lower()
+        t_norm = re.sub(r'[^a-záéíóúñü0-9 ]+', ' ', t)
+        t_norm = re.sub(r'\s+', ' ', t_norm).strip()
 
-        if es_afirmativo or es_manana:
-            tool_name = confirmacion["tool_name"]
-            args = confirmacion["args_originales"]
-            chat_id = confirmacion["chat_id"]
-            datos = confirmacion.get("datos_originales")
+        afirmativas = {
+            "sí", "si", "s", "yes", "y", "dale", "ok", "okay", "confirmo",
+            "confirmar", "confirmado", "adelante", "programa", "programar"
+        }
+        negativas = {"no", "n", "cancelar", "cancela", "cancelo", "olvida"}
+        es_afirmativo = t_norm in afirmativas or t_norm.startswith("si ") or t_norm.startswith("sí ")
+        es_negativo = t_norm in negativas
+        es_manana = t_norm in {"mañana", "manana", "para mañana", "para manana"}
 
-            # RECONSTRUIR FECHA CON LA ACLARACIÓN DEL USUARIO
-            mensaje_original = confirmacion.get("mensaje", "")
-            texto_mejorado = f"{mensaje_original} {texto}"
-            fecha_normalizada, ambiguedad, nueva_fecha_local = interpretar_fecha(texto_mejorado)
-
-            if not fecha_normalizada or not nueva_fecha_local:
-                await update.message.reply_text("⚠️ Sigo sin entender la hora. Por favor, dime la hora en formato numérico (ej: '2:40 PM').")
-                context.user_data["confirmacion_pendiente"] = None
-                return True
-
-            fecha_utc = local_a_utc(nueva_fecha_local)
-
-            if es_manana:
-                nueva_fecha_local = nueva_fecha_local + timedelta(days=1)
-                fecha_utc = local_a_utc(nueva_fecha_local)
-
-            # Guardar con la fecha corregida
-            query = """
-                INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado)
-                VALUES ($1, $2, $3, FALSE) RETURNING id
-            """
-            result = await ejecutar_query(query, (chat_id, mensaje_original, fecha_utc), fetch=True)
-            nuevo_id = result[0]["id"]
-            fecha_mostrar = nueva_fecha_local.strftime("%d/%m/%Y %I:%M %p")
-            mensaje_respuesta = f"✅ Recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje_original}*"
-            await guardar_historial(chat_id, {"role": "assistant", "content": mensaje_respuesta})
-            await update.message.reply_text(mensaje_respuesta)
-
-            context.user_data["confirmacion_pendiente"] = None
-            return True
-        else:
+        if es_negativo:
             context.user_data["confirmacion_pendiente"] = None
             await update.message.reply_text("❌ Recordatorio cancelado.")
             return True
 
+        tool_name = confirmacion.get("tool_name")
+        chat_id = confirmacion.get("chat_id", update.effective_chat.id)
+        mensaje_original = confirmacion.get("mensaje") or confirmacion.get("args_originales", {}).get("mensaje") or "Recordatorio"
+
+        # Caso especial: confirmación normal. NO reinterpretar la hora.
+        if es_afirmativo:
+            datos = confirmacion.get("datos_originales") or {}
+            fecha_local_iso = datos.get("fecha_local")
+            if fecha_local_iso:
+                fecha_local = datetime.fromisoformat(fecha_local_iso)
+            else:
+                _, _, fecha_local = interpretar_fecha(confirmacion.get("args_originales", {}).get("fecha_recordatorio", ""))
+            if not fecha_local:
+                await update.message.reply_text("⚠️ Perdí la fecha del recordatorio. Vuelve a indicarme la hora.")
+                context.user_data["confirmacion_pendiente"] = None
+                return True
+
+            if tool_name == "tool_editar_recordatorio":
+                id_recordatorio = confirmacion.get("id_recordatorio")
+                nueva_fecha = local_a_utc(fecha_local)
+                result = await tool_editar_recordatorio(
+                    id_recordatorio=id_recordatorio,
+                    nuevo_mensaje=confirmacion.get("nuevo_mensaje"),
+                    nueva_fecha=None,
+                    chat_id=chat_id,
+                )
+                if result.get("exito"):
+                    await ejecutar_query(
+                        "UPDATE recordatorios SET fecha_recordatorio = $1 WHERE id = $2 AND chat_id = $3",
+                        (nueva_fecha, id_recordatorio, chat_id),
+                    )
+                else:
+                    await update.message.reply_text(f"❌ {result.get('error', 'No pude actualizar el recordatorio.')}")
+                    context.user_data["confirmacion_pendiente"] = None
+                    return True
+            else:
+                fecha_utc = local_a_utc(fecha_local)
+                result = await ejecutar_query(
+                    "INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado) VALUES ($1, $2, $3, FALSE) RETURNING id",
+                    (chat_id, mensaje_original, fecha_utc), fetch=True
+                )
+                nuevo_id = result[0]["id"]
+
+            fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+            respuesta = f"✅ Recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje_original}*"
+            await guardar_historial(chat_id, {"role": "assistant", "content": respuesta})
+            await update.message.reply_text(respuesta, parse_mode="Markdown")
+            context.user_data["confirmacion_pendiente"] = None
+            return True
+
+        # Si dice "mañana", conservamos la misma hora y solo cambiamos el día.
+        if es_manana:
+            datos = confirmacion.get("datos_originales") or {}
+            fecha_local_iso = datos.get("fecha_local")
+            if fecha_local_iso:
+                fecha_local = datetime.fromisoformat(fecha_local_iso) + timedelta(days=1)
+            else:
+                _, _, fecha_local = interpretar_fecha(confirmacion.get("args_originales", {}).get("fecha_recordatorio", ""))
+                if fecha_local:
+                    fecha_local += timedelta(days=1)
+            if not fecha_local:
+                await update.message.reply_text("⚠️ No pude recuperar la hora original. Vuelve a indicarla, por favor.")
+                context.user_data["confirmacion_pendiente"] = None
+                return True
+            fecha_utc = local_a_utc(fecha_local)
+            await ejecutar_query(
+                "INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado) VALUES ($1, $2, $3, FALSE)",
+                (chat_id, mensaje_original, fecha_utc)
+            )
+            fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+            respuesta = f"✅ Recordatorio programado para mañana, {fecha_mostrar}.\n\n📝 *{mensaje_original}*"
+            await guardar_historial(chat_id, {"role": "assistant", "content": respuesta})
+            await update.message.reply_text(respuesta, parse_mode="Markdown")
+            context.user_data["confirmacion_pendiente"] = None
+            return True
+
+        await update.message.reply_text("⚠️ Responde 'sí' para confirmar, 'mañana' para moverlo a mañana o 'no' para cancelar.")
+        return True
     except Exception as e:
         logger.error(f"❌ Error en manejar_confirmacion: {e}", exc_info=True)
         await update.message.reply_text("⚠️ Error procesando la confirmación. Intenta de nuevo.")
         context.user_data["confirmacion_pendiente"] = None
         return True
 
-# ==================== MANEJO DE SELECCIÓN ====================
 async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     try:
         seleccion_data = context.user_data.get("esperando_seleccion")
