@@ -273,7 +273,7 @@ async def _resolver_proyecto_o_pedir(
         "error": f"{cliente} tiene {len(proyectos)} proyectos activos. Pregunta cuál y vuelve a llamar con 'nombre_corto'."
     }
 
-# ==================== TOOLS ====================
+# ==================== TOOLS (TODOS, COMPLETOS) ====================
 async def tool_registrar_proyecto(
     cliente: str,
     nombre_corto: str,
@@ -588,16 +588,8 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
     try:
         fecha_local = datetime.strptime(fecha_recordatorio, "%Y-%m-%d %H:%M:%S")
         fecha_utc = local_a_utc(fecha_local)
-        
         ahora_utc = datetime.utcnow()
         diferencia = (fecha_utc - ahora_utc).total_seconds()
-        
-        logger.info(f"📥 Fecha recibida (local): {fecha_local}")
-        logger.info(f"📤 Fecha convertida a UTC: {fecha_utc}")
-        logger.info(f"🕒 Hora actual UTC: {ahora_utc}")
-        logger.info(f"⏱️ Diferencia: {diferencia} segundos")
-        
-        # Si la diferencia es mayor a 180 segundos (3 minutos en el futuro), programar sin preguntar
         if diferencia > 180:
             query = """
                 INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado)
@@ -606,14 +598,8 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
             result = await ejecutar_query(query, (chat_id, mensaje, fecha_utc), fetch=True)
             nuevo_id = result[0]["id"]
             fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
-            return {
-                "exito": True,
-                "mensaje": f"🔔 Nuevo recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje}*",
-                "fecha_mostrar": fecha_mostrar,
-                "id": nuevo_id
-            }
+            return {"exito": True, "mensaje": f"🔔 Nuevo recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje}*"}
         else:
-            # Si la fecha es muy cercana o en el pasado, pedir confirmación
             fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
             hora_actual = ahora_cdmx().strftime("%I:%M %p")
             return {
@@ -622,15 +608,10 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
                 "fecha_local": fecha_mostrar,
                 "mensaje": mensaje,
                 "error": f"⚠️ La fecha programada ({fecha_mostrar}) es muy cercana o ya pasó. La hora actual en el sistema es {hora_actual}. ¿Quieres programarlo igualmente? Responde 'sí' para confirmar o 'no' para cancelar.",
-                "datos_originales": {
-                    "mensaje": mensaje,
-                    "fecha_local": fecha_local,
-                    "fecha_utc": fecha_utc
-                }
+                "datos_originales": {"mensaje": mensaje, "fecha_local": fecha_local, "fecha_utc": fecha_utc}
             }
-    except ValueError as e:
-        logger.error(f"Error parseando fecha en tool_crear_recordatorio: {e}")
-        return {"exito": False, "error": "Formato de fecha inválido. Usa YYYY-MM-DD HH:MM:SS."}
+    except ValueError:
+        return {"exito": False, "error": "Formato de fecha inválido. Usa YYYY-MM-DD HH:MM:SS. Ejemplo: 2026-08-30 12:20:00"}
     except Exception as e:
         logger.error(f"Error en tool_crear_recordatorio: {e}")
         return {"exito": False, "error": f"Error al programar recordatorio: {str(e)}"}
@@ -648,16 +629,11 @@ async def tool_consultar_recordatorios(chat_id: int):
     data = []
     for r in resultados:
         fecha_local = utc_a_local(r["fecha_recordatorio"])
-        data.append({
-            "id_recordatorio": r["id"],
-            "mensaje": r["mensaje"],
-            "fecha_local": fecha_local.strftime("%Y-%m-%d %H:%M:%S")
-        })
+        data.append({"id_recordatorio": r["id"], "mensaje": r["mensaje"], "fecha_local": fecha_local.strftime("%Y-%m-%d %H:%M:%S")})
     return {"exito": True, "data": data}
 
 async def tool_borrar_recordatorio(id_recordatorio: int, chat_id: int):
-    query = "DELETE FROM recordatorios WHERE id = $1 AND chat_id = $2"
-    await ejecutar_query(query, (id_recordatorio, chat_id))
+    await ejecutar_query("DELETE FROM recordatorios WHERE id = $1 AND chat_id = $2", (id_recordatorio, chat_id))
     return {"exito": True, "mensaje": f"🗑️ Recordatorio con ID {id_recordatorio} eliminado."}
 
 async def tool_editar_recordatorio(
@@ -667,10 +643,7 @@ async def tool_editar_recordatorio(
     chat_id: int = None,
 ):
     if id_recordatorio is None:
-        return {
-            "exito": False,
-            "error": "❌ Para editar un recordatorio debes proporcionar el ID exacto. Si quieres un recordatorio nuevo, usa 'recuérdame...' para crear uno nuevo."
-        }
+        return {"exito": False, "error": "❌ Para editar un recordatorio debes proporcionar el ID exacto. Si quieres un recordatorio nuevo, usa 'recuérdame...' para crear uno nuevo."}
     updates, params = [], []
     if nuevo_mensaje:
         updates.append(f"mensaje = ${len(params)+1}")
@@ -693,11 +666,7 @@ async def tool_editar_recordatorio(
                     "id_recordatorio": id_recordatorio,
                     "nuevo_mensaje": nuevo_mensaje,
                     "nueva_fecha": nueva_fecha,
-                    "datos_originales": {
-                        "mensaje": nuevo_mensaje,
-                        "fecha_local": fecha_local,
-                        "fecha_utc": fecha_utc
-                    }
+                    "datos_originales": {"mensaje": nuevo_mensaje, "fecha_local": fecha_local, "fecha_utc": fecha_utc}
                 }
             updates.append(f"fecha_recordatorio = ${len(params)+1}")
             params.append(fecha_utc)
@@ -716,7 +685,7 @@ async def tool_editar_recordatorio(
     await ejecutar_query(query, params)
     return {"exito": True, "mensaje": f"✏️ Recordatorio {id_recordatorio} actualizado correctamente."}
 
-# ==================== DEFINICIÓN DE TOOLS ====================
+# ==================== DEFINICIÓN DE TOOLS (15 tools) ====================
 TOOLS = [
     {
         "type": "function",
@@ -902,7 +871,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "mensaje": {"type": "string", "description": "Texto del recordatorio"},
-                    "fecha_recordatorio": {"type": "string", "description": "Fecha y hora exacta en formato YYYY-MM-DD HH:MM:SS (hora de México, NO UTC). Ejemplo: 2026-08-29 11:45:00"}
+                    "fecha_recordatorio": {"type": "string", "description": "Fecha y hora exacta en formato YYYY-MM-DD HH:MM:SS (hora de México, NO UTC). Ejemplo: 2026-08-30 12:20:00"}
                 },
                 "required": ["mensaje", "fecha_recordatorio"]
             },
@@ -975,16 +944,19 @@ SYSTEM_PROMPT_BASE = (
     "¡IMPORTANTE! SIEMPRE CREA NUEVOS RECORDATORIOS. NUNCA EDITES A MENOS QUE EL USUARIO DÉ UN ID EXPLÍCITO.\n\n"
     "Eres el asistente de gestión de proyectos de un taller de aluminio. "
     "Tu tarea es ayudar a registrar datos, consultar materiales y administrar pagos. "
-    "No asumas información. Si falta información, PREGÚNTALE al jefe antes de ejecutar. "
+    "No asumas información. Si el usuario escribe algo confuso, con errores tipográficos o incompleto, "
+    "PREGÚNTALE para aclarar antes de ejecutar cualquier acción. "
+    "Si no entiendes la fecha, hora o el mensaje, pide que lo repita con claridad. "
+    "NUNCA te quedes en silencio ni ejecutes sin confirmación si falta información. "
     "Habla de forma directa y clara, usando 'jefe' o 'patrón' ocasionalmente. "
     "Cuando muestres listas, preséntalas de manera ordenada, con emojis. "
     "Si el usuario pide borrar algo, siempre pregunta confirmación primero. "
     "REGLA ESTRICTA: "
-    "Ante cualquier frase que contenga 'recuérdame', 'acuerdame', 'pon un recordatorio', 'avísame' o similar, DEBES SIEMPRE usar tool_crear_recordatorio con una fecha y mensaje. "
-    "NUNCA uses tool_editar_recordatorio a menos que el usuario mencione EXPLÍCITAMENTE un número de ID (ej. 'edita el recordatorio 8', 'cambia el ID 5'). "
+    "Ante cualquier frase que contenga 'recuérdame', 'acuerdame', 'pon un recordatorio', 'avísame' o similar, "
+    "DEBES SIEMPRE usar tool_crear_recordatorio con una fecha y mensaje. "
+    "NUNCA uses tool_editar_recordatorio a menos que el usuario mencione EXPLÍCITAMENTE un número de ID. "
     "Si el usuario no da un ID, NO asumas que quiere editar el último. Crea uno nuevo. "
-    "Al crear un recordatorio, responde confirmando la fecha exacta que se programó y el mensaje, para que el usuario pueda verificar. "
-    "La fecha debe ser en hora de México (CDMX), NO en UTC. Ejemplo: 2026-08-29 11:45:00. "
+    "La fecha debe ser en hora de México (CDMX), NO en UTC. Ejemplo: 2026-08-30 12:20:00. "
     "Usa la fecha y hora actual que te proporciono para calcular correctamente las horas futuras."
 )
 
@@ -1075,11 +1047,10 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                 await guardar_historial(chat_id, {"role": "assistant", "content": respuesta})
                 await update.message.reply_text(respuesta, parse_mode="Markdown")
             else:
-                await update.message.reply_text("No tengo respuesta para eso.")
+                await update.message.reply_text("⚠️ No entendí tu solicitud. ¿Puedes reformularla con más claridad?")
             return
 
         tool_calls = message.tool_calls
-
         # Intercepción: editar sin ID -> crear
         for tool_call in tool_calls:
             if tool_call.function.name == "tool_editar_recordatorio":
@@ -1096,7 +1067,7 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                         nuevos_args = {"mensaje": mensaje_texto, "fecha_recordatorio": fecha_texto}
                         tool_calls[0].function.arguments = json.dumps(nuevos_args)
                     else:
-                        await update.message.reply_text("⚠️ No pude entender la fecha. Por favor, repite con la fecha y hora.")
+                        await update.message.reply_text("⚠️ No pude entender la fecha. Por favor, repite con la fecha y hora (ej. 2026-08-30 12:20:00).")
                         return
 
         mensaje_asistente = {
@@ -1174,7 +1145,6 @@ async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYP
     if not confirmacion:
         return False
 
-    # Palabras que indican confirmación
     palabras_afirmativas = ["sí", "si", "yes", "y", "dale", "ok", "confirmo", "confirmar", "programa", "programar", "adelante"]
     es_afirmativo = any(p in texto.lower() for p in palabras_afirmativas)
 
@@ -1185,7 +1155,6 @@ async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYP
         datos = confirmacion.get("datos_originales")
 
         if tool_name == "tool_crear_recordatorio" and datos:
-            # Guardar directamente
             mensaje = datos["mensaje"]
             fecha_utc = datos["fecha_utc"]
             query = """
@@ -1220,7 +1189,6 @@ async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYP
                 fecha_mostrar = datos["fecha_local"].strftime("%d/%m/%Y %I:%M %p") if datos and "fecha_local" in datos else ""
                 await update.message.reply_text(f"✅ Recordatorio {id_rec} actualizado forzadamente para {fecha_mostrar}.")
         else:
-            # Si no hay datos directos, intentar ejecutar la herramienta nuevamente
             args["chat_id"] = chat_id
             tool_func = TOOL_FUNCTIONS.get(tool_name)
             if tool_func:
@@ -1374,15 +1342,8 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
         for row in pendientes:
             mensaje = f"🔔 *RECORDATORIO:*\n{row['mensaje']}"
             try:
-                await context.bot.send_message(
-                    chat_id=row['chat_id'],
-                    text=mensaje,
-                    parse_mode="Markdown"
-                )
-                await ejecutar_query(
-                    "UPDATE recordatorios SET enviado = TRUE WHERE id = $1",
-                    (row['id'],)
-                )
+                await context.bot.send_message(chat_id=row['chat_id'], text=mensaje, parse_mode="Markdown")
+                await ejecutar_query("UPDATE recordatorios SET enviado = TRUE WHERE id = $1", (row['id'],))
                 logger.info(f"✅ Recordatorio {row['id']} enviado a {row['chat_id']}")
             except Exception as e:
                 logger.error(f"❌ Error enviando recordatorio {row['id']}: {e}")
@@ -1414,7 +1375,7 @@ def main():
         logger.warning("⚠️ JobQueue no disponible. Usando bucle de respaldo.")
         asyncio.create_task(recordatorio_loop(app))
 
-    logger.info("🤖 Bot iniciado con validación de fechas mejorada (margen de 3 minutos y confirmación flexible).")
+    logger.info("🤖 Bot iniciado con validación de fechas mejorada y manejo de ambigüedades.")
     app.run_polling()
 
 if __name__ == "__main__":
