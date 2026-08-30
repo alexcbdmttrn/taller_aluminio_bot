@@ -161,7 +161,7 @@ async def crear_tablas():
         except Exception as e:
             logger.warning(f"⚠️ Error creando tabla: {e}")
 
-# ==================== HISTORIAL EN POSTGRES (CORREGIDO) ====================
+# ==================== HISTORIAL EN POSTGRES ====================
 async def guardar_historial(chat_id: int, mensaje: dict):
     query = """
         INSERT INTO historial_chat (chat_id, rol, contenido)
@@ -583,11 +583,32 @@ async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str
     await ejecutar_query(f"UPDATE clientes SET {', '.join(updates)} WHERE id = ${len(params)}", params)
     return {"exito": True, "mensaje": f"Datos actualizados correctamente para el cliente '{nombre_real}'."}
 
-# ===== RECORDATORIOS (CORREGIDOS) =====
+# ===== RECORDATORIOS (CON VALIDACIÓN ESTRICTA DE FECHA) =====
 async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id: int):
     try:
         fecha_local = datetime.strptime(fecha_recordatorio, "%Y-%m-%d %H:%M:%S")
         fecha_utc = local_a_utc(fecha_local)
+        
+        # LOG: mostrar fecha recibida y convertida
+        logger.info(f"📥 Fecha recibida (local): {fecha_local}")
+        logger.info(f"📤 Fecha convertida a UTC: {fecha_utc}")
+        logger.info(f"🕒 Hora actual UTC: {datetime.utcnow()}")
+        
+        # Validación estricta: si la fecha UTC es menor o igual a ahora (+1 minuto de margen)
+        ahora_utc = datetime.utcnow()
+        diferencia = (fecha_utc - ahora_utc).total_seconds()
+        if diferencia <= 60:  # si es en el pasado o en menos de 1 minuto
+            # Pedir confirmación al usuario
+            fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+            return {
+                "exito": False,
+                "requiere_confirmacion": True,
+                "fecha_local": fecha_mostrar,
+                "mensaje": mensaje,
+                "error": f"⚠️ La fecha programada ({fecha_mostrar}) es muy cercana o ya pasó. ¿Quieres programarlo igualmente? Responde 'sí' para confirmar o 'no' para cancelar."
+            }
+        
+        # Si la fecha es futura (más de 1 minuto), guardar
         query = """
             INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado)
             VALUES ($1, $2, $3, FALSE) RETURNING id
@@ -595,8 +616,12 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
         result = await ejecutar_query(query, (chat_id, mensaje, fecha_utc), fetch=True)
         nuevo_id = result[0]["id"]
         fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
-        # NO mostramos el ID en la respuesta para evitar que el modelo lo recuerde
-        return {"exito": True, "mensaje": f"🔔 Nuevo recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje}*"}
+        return {
+            "exito": True,
+            "mensaje": f"🔔 Nuevo recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje}*",
+            "fecha_mostrar": fecha_mostrar,
+            "id": nuevo_id
+        }
     except ValueError as e:
         logger.error(f"Error parseando fecha en tool_crear_recordatorio: {e}")
         return {"exito": False, "error": "Formato de fecha inválido. Usa YYYY-MM-DD HH:MM:SS."}
@@ -635,7 +660,6 @@ async def tool_editar_recordatorio(
     nueva_fecha: str = None,
     chat_id: int = None,
 ):
-    # VALIDACIÓN ESTRICTA: si no se proporciona un ID, error
     if id_recordatorio is None:
         return {
             "exito": False,
@@ -649,6 +673,21 @@ async def tool_editar_recordatorio(
         try:
             fecha_local = datetime.strptime(nueva_fecha, "%Y-%m-%d %H:%M:%S")
             fecha_utc = local_a_utc(fecha_local)
+            # Validación similar para edición
+            ahora_utc = datetime.utcnow()
+            diferencia = (fecha_utc - ahora_utc).total_seconds()
+            if diferencia <= 60:
+                fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+                return {
+                    "exito": False,
+                    "requiere_confirmacion": True,
+                    "fecha_local": fecha_mostrar,
+                    "mensaje": nuevo_mensaje or "Recordatorio",
+                    "error": f"⚠️ La nueva fecha ({fecha_mostrar}) es muy cercana o ya pasó. ¿Quieres actualizarlo igualmente? Responde 'sí' para confirmar o 'no' para cancelar.",
+                    "id_recordatorio": id_recordatorio,
+                    "nuevo_mensaje": nuevo_mensaje,
+                    "nueva_fecha": nueva_fecha
+                }
             updates.append(f"fecha_recordatorio = ${len(params)+1}")
             params.append(fecha_utc)
         except ValueError:
@@ -847,12 +886,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_crear_recordatorio",
-            "description": "PROGRAMA UN NUEVO RECORDATORIO. Esta herramienta SIEMPRE crea un ID nuevo. Se usa cuando el usuario dice 'recuérdame...', 'acuerdame...', 'pon un recordatorio...', etc. NUNCA uses tool_editar_recordatorio para crear uno nuevo.",
+            "description": "PROGRAMA UN NUEVO RECORDATORIO. SIEMPRE crea un ID nuevo. Se usa cuando el usuario dice 'recuérdame...', 'acuerdame...', etc. NUNCA uses tool_editar_recordatorio para crear uno nuevo.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "mensaje": {"type": "string", "description": "Texto del recordatorio"},
-                    "fecha_recordatorio": {"type": "string", "description": "Fecha y hora exacta en formato YYYY-MM-DD HH:MM:SS (hora de México)"}
+                    "fecha_recordatorio": {"type": "string", "description": "Fecha y hora exacta en formato YYYY-MM-DD HH:MM:SS (hora de México, NO UTC). Ejemplo: 2026-08-29 11:45:00"}
                 },
                 "required": ["mensaje", "fecha_recordatorio"]
             },
@@ -894,7 +933,7 @@ TOOLS = [
                 "properties": {
                     "id_recordatorio": {"type": "integer", "description": "El ID numérico del recordatorio a editar (OBLIGATORIO)"},
                     "nuevo_mensaje": {"type": "string", "description": "El nuevo texto del recordatorio (opcional)"},
-                    "nueva_fecha": {"type": "string", "description": "La nueva fecha en formato YYYY-MM-DD HH:MM:SS (opcional)"}
+                    "nueva_fecha": {"type": "string", "description": "La nueva fecha en formato YYYY-MM-DD HH:MM:SS (hora de México, NO UTC) (opcional)"}
                 },
                 "required": ["id_recordatorio"],
             },
@@ -925,18 +964,17 @@ SYSTEM_PROMPT_BASE = (
     "¡IMPORTANTE! SIEMPRE CREA NUEVOS RECORDATORIOS. NUNCA EDITES A MENOS QUE EL USUARIO DÉ UN ID EXPLÍCITO.\n\n"
     "Eres el asistente de gestión de proyectos de un taller de aluminio. "
     "Tu tarea es ayudar a registrar datos, consultar materiales y administrar pagos. "
-    "No asumas información. Si el usuario te pide registrar un gasto o un pago, pero falta la cantidad, el concepto o el proyecto, PREGÚNTALE en lenguaje natural antes de ejecutar la herramienta. "
-    "Solo ejecuta herramientas de base de datos cuando tengas toda la información requerida explícita en la conversación. "
-    "Si el usuario te insiste en ejecutar una acción, vuelve a utilizar la herramienta correspondiente, ignorando fallos previos. "
+    "No asumas información. Si falta información, PREGÚNTALE al jefe antes de ejecutar. "
     "Habla de forma directa y clara, usando 'jefe' o 'patrón' ocasionalmente. "
-    "Cuando muestres listas, preséntalas de manera ordenada, con emojis para facilitar la lectura. "
+    "Cuando muestres listas, preséntalas de manera ordenada, con emojis. "
     "Si el usuario pide borrar algo, siempre pregunta confirmación primero. "
     # ===== REGLA DEFINITIVA PARA RECORDATORIOS =====
     "REGLA ESTRICTA: "
     "Ante cualquier frase que contenga 'recuérdame', 'acuerdame', 'pon un recordatorio', 'avísame' o similar, DEBES SIEMPRE usar tool_crear_recordatorio con una fecha y mensaje. "
     "NUNCA uses tool_editar_recordatorio a menos que el usuario mencione EXPLÍCITAMENTE un número de ID (ej. 'edita el recordatorio 8', 'cambia el ID 5'). "
     "Si el usuario no da un ID, NO asumas que quiere editar el último. Crea uno nuevo. "
-    "Al crear un recordatorio, responde confirmando la fecha y el mensaje, sin mencionar el ID para no confundir al modelo en futuras interacciones."
+    "Al crear un recordatorio, responde confirmando la fecha exacta que se programó y el mensaje, para que el usuario pueda verificar. "
+    "La fecha debe ser en hora de México (CDMX), NO en UTC. Ejemplo: 2026-08-29 11:45:00."
 )
 
 # ==================== PODA DE HISTORIAL ====================
@@ -991,7 +1029,6 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         return
 
     chat_id = update.effective_chat.id
-
     await guardar_historial(chat_id, {"role": "user", "content": texto})
 
     historial = await obtener_historial(chat_id, 15)
@@ -1032,39 +1069,25 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 
         tool_calls = message.tool_calls
 
-        # ===== INTERCEPCIÓN: Detectamos si se intenta editar sin ID =====
-        # Buscamos si el usuario mencionó un número de ID en su mensaje original
-        # Si no hay ID y la herramienta es editar, la convertimos a crear.
+        # ===== INTERCEPCIÓN: Convertir edición sin ID en creación =====
         for tool_call in tool_calls:
             if tool_call.function.name == "tool_editar_recordatorio":
                 args = json.loads(tool_call.function.arguments)
-                # Verificar si el usuario mencionó un ID en el mensaje (búsqueda simple)
-                id_en_mensaje = re.search(r'\b(\d+)\b', texto)
-                # También buscamos palabras clave que indiquen edición
+                id_en_mensaje = re.search(r'\b\d+\b', texto)
                 palabras_edicion = ['edita', 'cambia', 'modifica', 'mueve', 'actualiza']
                 es_edicion_explicita = any(p in texto.lower() for p in palabras_edicion)
                 if not id_en_mensaje or not es_edicion_explicita:
-                    # No se mencionó ID o no hay verbo de edición -> redirigir a crear
                     logger.info(f"🔄 Redirigiendo edición sin ID a creación: {texto}")
-                    # Extraer mensaje y fecha de los args de edición
                     mensaje_texto = args.get('nuevo_mensaje', texto)
                     fecha_texto = args.get('nueva_fecha')
                     if fecha_texto:
-                        # Redirigir a crear con los mismos datos
                         tool_calls[0].function.name = "tool_crear_recordatorio"
-                        # Reconstruir args para crear
-                        nuevos_args = {
-                            "mensaje": mensaje_texto,
-                            "fecha_recordatorio": fecha_texto
-                        }
+                        nuevos_args = {"mensaje": mensaje_texto, "fecha_recordatorio": fecha_texto}
                         tool_calls[0].function.arguments = json.dumps(nuevos_args)
-                        # Eliminar el id_recordatorio para que no cause error
                     else:
-                        # Si no hay fecha, pedir que la especifique (esto no debería pasar)
                         await update.message.reply_text("⚠️ No pude entender la fecha. Por favor, repite con la fecha y hora.")
                         return
 
-        # Guardar el mensaje del asistente con tool_calls (completo)
         mensaje_asistente = {
             "role": "assistant",
             "content": message.content,
@@ -1095,6 +1118,24 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                 "content": json.dumps(result),
             })
 
+            # Manejar confirmación de fecha en pasado (para creación o edición)
+            if result.get("requiere_confirmacion"):
+                context.user_data["confirmacion_pendiente"] = {
+                    "tool_name": function_name,
+                    "args_originales": function_args,
+                    "fecha_mostrar": result.get("fecha_local"),
+                    "mensaje": result.get("mensaje"),
+                    "chat_id": chat_id,
+                    "id_recordatorio": result.get("id_recordatorio"),
+                    "nuevo_mensaje": result.get("nuevo_mensaje"),
+                    "nueva_fecha": result.get("nueva_fecha")
+                }
+                await update.message.reply_text(
+                    f"{result.get('error')}\n\n"
+                    "Responde 'sí' para programarlo igual o 'no' para cancelar."
+                )
+                return
+
             if result.get("requiere_seleccion"):
                 opciones = result.get("opciones", [])
                 mensaje_opciones = f"{result.get('error', '')}\n\n"
@@ -1115,6 +1156,75 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         mensajes_api = [system_msg] + historial_podado
 
     await update.message.reply_text("El proceso ha tomado demasiados pasos. Por favor, simplifica tu solicitud.")
+
+# ==================== MANEJO DE CONFIRMACIÓN DE FECHA EN PASADO ====================
+async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
+    confirmacion = context.user_data.get("confirmacion_pendiente")
+    if not confirmacion:
+        return False
+
+    if texto.lower() in ["sí", "si", "yes", "y"]:
+        # Confirmado: programar o editar igual
+        tool_name = confirmacion["tool_name"]
+        args = confirmacion["args_originales"]
+        chat_id = confirmacion["chat_id"]
+        args["chat_id"] = chat_id
+        tool_func = TOOL_FUNCTIONS.get(tool_name)
+        if tool_func:
+            try:
+                # Volver a ejecutar la herramienta con los mismos argumentos (sin la validación, pero la herramienta volverá a validar)
+                # Para evitar un bucle, necesitamos una bandera para omitir validación. La solución es que el usuario confirme y luego guardar directamente.
+                # Pero para simplificar, llamamos a la herramienta nuevamente, pero como la fecha ya fue validada, podemos guardar directamente.
+                # En lugar de llamar a la herramienta, podemos guardar directamente en la base de datos.
+                # Vamos a hacer un guardado directo.
+                if tool_name == "tool_crear_recordatorio":
+                    # Extraer mensaje y fecha
+                    mensaje = args.get("mensaje")
+                    fecha_str = args.get("fecha_recordatorio")
+                    fecha_local = datetime.strptime(fecha_str, "%Y-%m-%d %H:%M:%S")
+                    fecha_utc = local_a_utc(fecha_local)
+                    query = """
+                        INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado)
+                        VALUES ($1, $2, $3, FALSE) RETURNING id
+                    """
+                    result = await ejecutar_query(query, (chat_id, mensaje, fecha_utc), fetch=True)
+                    nuevo_id = result[0]["id"]
+                    fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+                    mensaje_respuesta = f"✅ Recordatorio forzado para el {fecha_mostrar}.\n\n📝 *{mensaje}*"
+                    await guardar_historial(chat_id, {"role": "assistant", "content": mensaje_respuesta})
+                    await update.message.reply_text(mensaje_respuesta)
+                elif tool_name == "tool_editar_recordatorio":
+                    # Editar directamente
+                    id_rec = args.get("id_recordatorio")
+                    nuevo_mensaje = args.get("nuevo_mensaje")
+                    nueva_fecha_str = args.get("nueva_fecha")
+                    updates = []
+                    params = []
+                    if nuevo_mensaje:
+                        updates.append(f"mensaje = ${len(params)+1}")
+                        params.append(nuevo_mensaje)
+                    if nueva_fecha_str:
+                        fecha_local = datetime.strptime(nueva_fecha_str, "%Y-%m-%d %H:%M:%S")
+                        fecha_utc = local_a_utc(fecha_local)
+                        updates.append(f"fecha_recordatorio = ${len(params)+1}")
+                        params.append(fecha_utc)
+                    if updates:
+                        params.append(id_rec)
+                        params.append(chat_id)
+                        set_clause = ", ".join(updates)
+                        query = f"UPDATE recordatorios SET {set_clause} WHERE id = ${len(params)-1} AND chat_id = ${len(params)}"
+                        await ejecutar_query(query, params)
+                        await update.message.reply_text(f"✅ Recordatorio {id_rec} actualizado forzadamente.")
+                context.user_data["confirmacion_pendiente"] = None
+                return True
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error al programar: {str(e)}")
+        context.user_data["confirmacion_pendiente"] = None
+        return True
+    else:
+        context.user_data["confirmacion_pendiente"] = None
+        await update.message.reply_text("❌ Recordatorio cancelado.")
+        return True
 
 # ==================== MANEJO DE SELECCIÓN ====================
 async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
@@ -1184,6 +1294,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await limpiar_historial(chat_id)
     context.user_data["esperando_seleccion"] = None
+    context.user_data["confirmacion_pendiente"] = None
     await update.message.reply_text(
         "¡Hola, jefe! 🛠️ Soy su asistente de gestión de proyectos.\n\n"
         "Puedo ayudarle a:\n"
@@ -1200,6 +1311,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+
+    # Verificar confirmación de fecha en pasado
+    if context.user_data.get("confirmacion_pendiente"):
+        if update.message.text:
+            await manejar_confirmacion(update, context, update.message.text)
+        else:
+            await update.message.reply_text("⚠️ Por favor, responde con 'sí' o 'no'.")
+        return
 
     if context.user_data.get("esperando_seleccion"):
         if update.message.text:
@@ -1239,6 +1358,7 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
             WHERE enviado = FALSE AND fecha_recordatorio <= (NOW() AT TIME ZONE 'UTC')
         """
         pendientes = await ejecutar_query(query, fetch=True)
+        logger.info(f"🔍 Revisando recordatorios: {len(pendientes)} pendientes")
         for row in pendientes:
             mensaje = f"🔔 *RECORDATORIO:*\n{row['mensaje']}"
             try:
@@ -1251,11 +1371,11 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
                     "UPDATE recordatorios SET enviado = TRUE WHERE id = $1",
                     (row['id'],)
                 )
-                logger.info(f"Recordatorio {row['id']} enviado a {row['chat_id']}")
+                logger.info(f"✅ Recordatorio {row['id']} enviado a {row['chat_id']}")
             except Exception as e:
-                logger.error(f"Error enviando recordatorio {row['id']}: {e}")
+                logger.error(f"❌ Error enviando recordatorio {row['id']}: {e}")
     except Exception as e:
-        logger.error(f"Error en checar_recordatorios: {e}")
+        logger.error(f"❌ Error en checar_recordatorios: {e}")
 
 # ==================== INICIO ====================
 async def recordatorio_loop(app):
@@ -1282,7 +1402,7 @@ def main():
         logger.warning("⚠️ JobQueue no disponible. Usando bucle de respaldo.")
         asyncio.create_task(recordatorio_loop(app))
 
-    logger.info("🤖 Bot iniciado con corrección de recordatorios (intercepción de ediciones sin ID).")
+    logger.info("🤖 Bot iniciado con validación estricta de fechas (evita envíos instantáneos).")
     app.run_polling()
 
 if __name__ == "__main__":
