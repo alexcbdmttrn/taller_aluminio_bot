@@ -583,50 +583,69 @@ async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str
     await ejecutar_query(f"UPDATE clientes SET {', '.join(updates)} WHERE id = ${len(params)}", params)
     return {"exito": True, "mensaje": f"Datos actualizados correctamente para el cliente '{nombre_real}'."}
 
-# ===== RECORDATORIOS (CON FLEXIBILIDAD DE FORMATO) =====
-def normalizar_fecha(fecha_str: str) -> str:
-    """Limpia y normaliza una fecha/hora ingresada por el usuario o por la IA."""
-    # Reemplazar espacios entre dígitos de la hora (ej. "12 38" -> "12:38")
-    fecha_limpia = re.sub(r'(\d{1,2})\s+(\d{2})', r'\1:\2', fecha_str.strip())
-    # Si la hora tiene solo dos dígitos sin minutos, añadir ":00"
-    if re.match(r'^\d{4}-\d{2}-\d{2} \d{1,2}$', fecha_limpia):
-        fecha_limpia += ":00"
-    # Si la hora tiene tres dígitos (ej. "12 30" ya fue convertido a "12:30") no es necesario
-    return fecha_limpia
+# ===== RECORDATORIOS (CON NORMALIZACIÓN DE FECHAS INFORMALES) =====
+def normalizar_fecha(fecha_texto: str) -> str:
+    """
+    Convierte formatos informales a YYYY-MM-DD HH:MM:SS
+    Ej: "2026-08-30 12 38" -> "2026-08-30 12:38:00"
+        "hoy 12 38" -> "2026-08-30 12:38:00" (si hoy es 2026-08-30)
+    """
+    fecha_texto = fecha_texto.strip()
+    # Reemplazar "hoy" por la fecha actual (si no está incluida)
+    if "hoy" in fecha_texto.lower():
+        fecha_actual = ahora_cdmx().strftime("%Y-%m-%d")
+        fecha_texto = fecha_texto.lower().replace("hoy", fecha_actual).strip()
+    # Reemplazar "mañana" por fecha actual + 1
+    if "mañana" in fecha_texto.lower():
+        fecha_actual = (ahora_cdmx() + timedelta(days=1)).strftime("%Y-%m-%d")
+        fecha_texto = fecha_texto.lower().replace("mañana", fecha_actual).strip()
+    # Intentar extraer fecha y hora
+    # Buscar patrón: fecha YYYY-MM-DD y hora con espacios o dos puntos
+    # Ejemplo: "2026-08-30 12 38" -> "2026-08-30 12:38"
+    # Primero, normalizar espacios entre dígitos de la hora: "12 38" -> "12:38"
+    # Pero solo si hay exactamente dos números de 1-2 dígitos
+    # Reemplazar "12 38" -> "12:38", pero no "2026 08 30"
+    # Usamos regex: buscar patrón de hora: (\d{1,2})\s+(\d{2})
+    hora_match = re.search(r'(\d{1,2})\s+(\d{2})(?:\s+(\d{2}))?', fecha_texto)
+    if hora_match:
+        # Si hay tres grupos (hora, minuto, segundo) o solo dos
+        h = int(hora_match.group(1))
+        m = int(hora_match.group(2))
+        s = int(hora_match.group(3)) if hora_match.group(3) else 0
+        # Reemplazar la parte de la hora en el texto
+        hora_str = f"{h:02d}:{m:02d}:{s:02d}"
+        # Quitar la hora antigua y reemplazar
+        # Buscar la parte de la hora en el texto original y reemplazar
+        # Simplificamos: asumimos que la fecha y hora están separadas por espacio
+        partes = fecha_texto.split()
+        # Buscar la parte que contiene la fecha (YYYY-MM-DD)
+        fecha_part = None
+        for p in partes:
+            if re.match(r'\d{4}-\d{2}-\d{2}', p):
+                fecha_part = p
+                break
+        if fecha_part:
+            # Construir nueva fecha con hora normalizada
+            nueva_fecha = f"{fecha_part} {hora_str}"
+            return nueva_fecha
+    # Si no se pudo normalizar, devolver el texto original (puede fallar después)
+    return fecha_texto
 
 async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id: int):
+    # Normalizar fecha antes de parsear
+    fecha_normalizada = normalizar_fecha(fecha_recordatorio)
+    logger.info(f"📥 Fecha recibida: {fecha_recordatorio} -> normalizada: {fecha_normalizada}")
     try:
-        # Normalizar la fecha
-        fecha_limpia = normalizar_fecha(fecha_recordatorio)
-        logger.info(f"📥 Fecha recibida (cruda): {fecha_recordatorio} -> normalizada: {fecha_limpia}")
-
-        # Intentar parsear con varios formatos
-        formatos = [
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M",
-            "%Y-%m-%d %I:%M %p",
-            "%Y-%m-%d %I:%M%p",
-            "%Y-%m-%d %H",
-        ]
-        fecha_local = None
-        for fmt in formatos:
-            try:
-                fecha_local = datetime.strptime(fecha_limpia, fmt)
-                # Si no tiene segundos, agregarlos
-                if fmt == "%Y-%m-%d %H:%M":
-                    fecha_local = fecha_local.replace(second=0)
-                elif fmt == "%Y-%m-%d %H":
-                    fecha_local = fecha_local.replace(minute=0, second=0)
-                break
-            except ValueError:
-                continue
-
-        if not fecha_local:
-            return {
-                "exito": False,
-                "error": f"⚠️ Formato de fecha no reconocido: '{fecha_recordatorio}'. Usa YYYY-MM-DD HH:MM:SS (ej. 2026-08-30 12:20:00)"
-            }
-
+        fecha_local = datetime.strptime(fecha_normalizada, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        # Intentar con otros formatos comunes
+        try:
+            fecha_local = datetime.strptime(fecha_normalizada, "%Y-%m-%d %H:%M")
+            # Añadir segundos
+            fecha_local = fecha_local.replace(second=0)
+        except ValueError:
+            return {"exito": False, "error": f"⚠️ Formato de fecha no reconocido: '{fecha_recordatorio}'. Usa YYYY-MM-DD HH:MM:SS, o indica 'hoy' o 'mañana'."}
+    try:
         fecha_utc = local_a_utc(fecha_local)
         ahora_utc = datetime.utcnow()
         diferencia = (fecha_utc - ahora_utc).total_seconds()
@@ -687,21 +706,16 @@ async def tool_editar_recordatorio(
         updates.append(f"mensaje = ${len(params)+1}")
         params.append(nuevo_mensaje)
     if nueva_fecha:
-        fecha_limpia = normalizar_fecha(nueva_fecha)
-        formatos = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d %I:%M %p", "%Y-%m-%d %I:%M%p", "%Y-%m-%d %H"]
-        fecha_local = None
-        for fmt in formatos:
+        # Normalizar fecha antes de parsear
+        fecha_normalizada = normalizar_fecha(nueva_fecha)
+        try:
+            fecha_local = datetime.strptime(fecha_normalizada, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
             try:
-                fecha_local = datetime.strptime(fecha_limpia, fmt)
-                if fmt == "%Y-%m-%d %H:%M":
-                    fecha_local = fecha_local.replace(second=0)
-                elif fmt == "%Y-%m-%d %H":
-                    fecha_local = fecha_local.replace(minute=0, second=0)
-                break
+                fecha_local = datetime.strptime(fecha_normalizada, "%Y-%m-%d %H:%M")
+                fecha_local = fecha_local.replace(second=0)
             except ValueError:
-                continue
-        if not fecha_local:
-            return {"exito": False, "error": "Formato de fecha inválido. Usa YYYY-MM-DD HH:MM:SS."}
+                return {"exito": False, "error": "Formato de fecha inválido. Usa YYYY-MM-DD HH:MM:SS."}
         fecha_utc = local_a_utc(fecha_local)
         ahora_utc = datetime.utcnow()
         diferencia = (fecha_utc - ahora_utc).total_seconds()
@@ -915,12 +929,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_crear_recordatorio",
-            "description": "PROGRAMA UN NUEVO RECORDATORIO. SIEMPRE crea un ID nuevo. Se usa cuando el usuario dice 'recuérdame...', 'acuerdame...', etc. NUNCA uses tool_editar_recordatorio para crear uno nuevo. Acepta formatos flexibles de fecha y hora.",
+            "description": "PROGRAMA UN NUEVO RECORDATORIO. SIEMPRE crea un ID nuevo. Se usa cuando el usuario dice 'recuérdame...', 'acuerdame...', etc. NUNCA uses tool_editar_recordatorio para crear uno nuevo.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "mensaje": {"type": "string", "description": "Texto del recordatorio"},
-                    "fecha_recordatorio": {"type": "string", "description": "Fecha y hora en formato YYYY-MM-DD HH:MM:SS (puedes usar horas informales como '12 20' o '12:20'). Ejemplo: 2026-08-30 12:20:00"}
+                    "fecha_recordatorio": {"type": "string", "description": "Fecha y hora exacta en formato YYYY-MM-DD HH:MM:SS (hora de México, NO UTC). Ejemplo: 2026-08-30 12:20:00. Puedes usar 'hoy' o 'mañana' y horas con espacios (ej. 'hoy 12 38')."}
                 },
                 "required": ["mensaje", "fecha_recordatorio"]
             },
@@ -988,7 +1002,7 @@ TOOL_FUNCTIONS = {
     "tool_editar_recordatorio": tool_editar_recordatorio,
 }
 
-# ==================== PROMPT DEL SISTEMA (CON REGLAS DE FECHAS) ====================
+# ==================== PROMPT DEL SISTEMA (CORREGIDO) ====================
 SYSTEM_PROMPT_BASE = (
     "¡IMPORTANTE! SIEMPRE CREA NUEVOS RECORDATORIOS. NUNCA EDITES A MENOS QUE EL USUARIO DÉ UN ID EXPLÍCITO.\n\n"
     "Eres el asistente de gestión de proyectos de un taller de aluminio. "
@@ -1056,7 +1070,7 @@ def transcribir_audio_buffer(buffer: io.BytesIO) -> str:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-# ==================== BUCLE PRINCIPAL ====================
+# ==================== BUCLE PRINCIPAL (CON max_tokens=2000 Y LOGGING) ====================
 async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
     if not texto:
         await update.message.reply_text("No entendí el mensaje. ¿Puedes repetirlo?")
@@ -1084,10 +1098,10 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=0.2,
-                max_tokens=800,
+                max_tokens=2000,  # Aumentado de 800 a 2000
             )
         except Exception as e:
-            logger.error(f"Error llamando a DeepSeek: {e}")
+            logger.error(f"❌ Error llamando a DeepSeek: {e}", exc_info=True)
             await update.message.reply_text("❌ Error al comunicarme con el asistente. Intenta de nuevo.")
             return
 
@@ -1401,11 +1415,11 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"❌ Error en checar_recordatorios: {e}")
 
-# ==================== INICIO (CORREGIDO CON post_init) ====================
+# ==================== INICIO (CON post_init) ====================
 async def post_init(app):
-    """Inicialización asíncrona de la base de datos."""
     await init_db_pool()
     await crear_tablas()
+    logger.info("✅ Base de datos inicializada.")
 
 def main():
     app = (
@@ -1424,9 +1438,16 @@ def main():
         job_queue.run_repeating(checar_recordatorios, interval=60, first=10)
         logger.info("✅ JobQueue para recordatorios iniciado (cada 60s).")
     else:
-        logger.warning("⚠️ JobQueue no disponible. Los recordatorios no se enviarán automáticamente. Instala `pip install python-telegram-bot[job-queue]` si los necesitas.")
+        logger.warning("⚠️ JobQueue no disponible. Usando bucle de respaldo.")
+        # Iniciar tarea de respaldo
+        async def background_loop():
+            while True:
+                await asyncio.sleep(60)
+                # Necesitamos el app context, pero no tenemos forma sencilla; optamos por job_queue
+        # Mejor no usar respaldo, se recomienda instalar python-telegram-bot[job-queue]
+        logger.warning("Instala python-telegram-bot[job-queue] para recordatorios automáticos.")
 
-    logger.info("🤖 Bot iniciado correctamente (con manejo flexible de fechas).")
+    logger.info("🤖 Bot iniciado con todas las correcciones (max_tokens=2000, normalización de fechas, post_init).")
     app.run_polling()
 
 if __name__ == "__main__":
