@@ -1122,11 +1122,11 @@ SYSTEM_PROMPT_BASE = (
     "Cuando muestres listas, preséntalas de manera ordenada, con emojis. "
     "Si el usuario pide borrar algo, siempre pregunta confirmación primero. "
     "REGLA PARA RECORDATORIOS: "
-    "Cuando el usuario pida un recordatorio, interpreta la fecha y hora que menciona (ej: 'a las 2 con 35 de la mañana'). "
-    "Si hay ambigüedad (AM/PM), pregúntale al usuario antes de guardar. "
-    "Muestra la fecha y hora que interpretaste y pide confirmación. "
-    "Si la hora ya pasó, sugiere automáticamente mañana y pregunta. "
-    "NUNCA guardes un recordatorio sin confirmación explícita del usuario."
+    "Cuando el usuario pida un recordatorio, interpreta la fecha y hora que menciona "
+    "(ej: 'a las 2 con 35 de la mañana') y llama a tool_crear_recordatorio directamente. "
+    "La herramienta ya se encarga de pedir confirmación si hay ambigüedad de AM/PM o si "
+    "la hora ya pasó — no le preguntes tú también en lenguaje natural antes de llamarla, "
+    "para no duplicar la pregunta y hacer esperar al jefe dos veces por lo mismo."
 )
 
 # ==================== PODA ====================
@@ -1578,10 +1578,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"❌ Error en start: {e}", exc_info=True)
 
+async def _obtener_texto(update: Update) -> Optional[str]:
+    """Devuelve el texto del mensaje, transcribiendo el audio si es necesario.
+    Se usa siempre, sin importar en qué parte del flujo esté la conversación
+    (mensaje normal, esperando confirmación, o esperando selección de proyecto),
+    para que la voz nunca se ignore por estar en medio de una pregunta pendiente.
+    Devuelve None si no se pudo obtener texto (audio vacío, sin transcriptor, error)."""
+    if update.message.text:
+        return update.message.text
+
+    if update.message.voice:
+        if not groq_client:
+            await update.message.reply_text("❌ El servicio de transcripción de voz no está configurado.")
+            return None
+        try:
+            await update.message.reply_text("🎙️ Escuchando...")
+            voice_file = await update.message.voice.get_file()
+            buffer = io.BytesIO()
+            await voice_file.download_to_memory(buffer)
+            texto = await asyncio.to_thread(transcribir_audio_buffer, buffer)
+            if not texto:
+                await update.message.reply_text("❌ No pude entender el audio. ¿Puedes repetirlo o escribirlo?")
+                return None
+            await update.message.reply_text(f"📝 *\"{texto}\"*", parse_mode="Markdown")
+            return texto
+        except Exception as e:
+            logger.error(f"Error manejando audio: {e}")
+            await update.message.reply_text("❌ Error al procesar el audio. Intenta de nuevo.")
+            return None
+
+    return None
+
+
 async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        texto = update.message.text if update.message else ""
-        texto_lower = texto.lower() if texto else ""
+        texto = await _obtener_texto(update)
+        if texto is None:
+            return  # ya se le avisó al jefe (audio vacío, sin transcriptor, o error)
+
+        texto_lower = texto.lower()
 
         # Válvula de escape sin /start
         if any(palabra in texto_lower for palabra in ["cancelar", "olvida", "reiniciar", "basta", "no importa"]):
@@ -1591,39 +1626,14 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if context.user_data.get("confirmacion_pendiente"):
-            if update.message.text:
-                await manejar_confirmacion(update, context, update.message.text)
-            else:
-                await update.message.reply_text("⚠️ Por favor, responde con 'sí', 'mañana' o 'no'.")
+            await manejar_confirmacion(update, context, texto)
             return
 
         if context.user_data.get("esperando_seleccion"):
-            if update.message.text:
-                await manejar_seleccion(update, context, update.message.text)
-            else:
-                await update.message.reply_text("⚠️ Por favor, responde con texto para seleccionar el proyecto.")
+            await manejar_seleccion(update, context, texto)
             return
 
-        if update.message.text:
-            await procesar_mensaje(update, context, update.message.text)
-        elif update.message.voice:
-            if not groq_client:
-                await update.message.reply_text("❌ El servicio de transcripción de voz no está configurado.")
-                return
-            try:
-                await update.message.reply_text("🎙️ Escuchando...")
-                voice_file = await update.message.voice.get_file()
-                buffer = io.BytesIO()
-                await voice_file.download_to_memory(buffer)
-                texto = await asyncio.to_thread(transcribir_audio_buffer, buffer)
-                if not texto:
-                    await update.message.reply_text("❌ No pude entender el audio. ¿Puedes repetirlo o escribirlo?")
-                    return
-                await update.message.reply_text(f"📝 *\"{texto}\"*", parse_mode="Markdown")
-                await procesar_mensaje(update, context, texto)
-            except Exception as e:
-                logger.error(f"Error manejando audio: {e}")
-                await update.message.reply_text("❌ Error al procesar el audio. Intenta de nuevo.")
+        await procesar_mensaje(update, context, texto)
 
     except Exception as e:
         logger.error(f"❌ Error en handler: {e}", exc_info=True)
