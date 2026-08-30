@@ -273,7 +273,7 @@ async def _resolver_proyecto_o_pedir(
         "error": f"{cliente} tiene {len(proyectos)} proyectos activos. Pregunta cuál y vuelve a llamar con 'nombre_corto'."
     }
 
-# ==================== TOOLS (TODOS, COMPLETOS) ====================
+# ==================== TOOLS ====================
 async def tool_registrar_proyecto(
     cliente: str,
     nombre_corto: str,
@@ -586,7 +586,13 @@ async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str
 # ===== RECORDATORIOS (CON VALIDACIÓN MEJORADA) =====
 async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id: int):
     try:
+        # Intentar parsear la fecha estricta
         fecha_local = datetime.strptime(fecha_recordatorio, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        # Si falla, devolver error claro pidiendo el formato correcto
+        return {"exito": False, "error": f"⚠️ Formato de fecha inválido: '{fecha_recordatorio}'. Debe ser YYYY-MM-DD HH:MM:SS. Ejemplo: 2026-08-30 12:20:00"}
+
+    try:
         fecha_utc = local_a_utc(fecha_local)
         ahora_utc = datetime.utcnow()
         diferencia = (fecha_utc - ahora_utc).total_seconds()
@@ -610,8 +616,6 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
                 "error": f"⚠️ La fecha programada ({fecha_mostrar}) es muy cercana o ya pasó. La hora actual en el sistema es {hora_actual}. ¿Quieres programarlo igualmente? Responde 'sí' para confirmar o 'no' para cancelar.",
                 "datos_originales": {"mensaje": mensaje, "fecha_local": fecha_local, "fecha_utc": fecha_utc}
             }
-    except ValueError:
-        return {"exito": False, "error": "Formato de fecha inválido. Usa YYYY-MM-DD HH:MM:SS. Ejemplo: 2026-08-30 12:20:00"}
     except Exception as e:
         logger.error(f"Error en tool_crear_recordatorio: {e}")
         return {"exito": False, "error": f"Error al programar recordatorio: {str(e)}"}
@@ -939,7 +943,7 @@ TOOL_FUNCTIONS = {
     "tool_editar_recordatorio": tool_editar_recordatorio,
 }
 
-# ==================== PROMPT DEL SISTEMA ====================
+# ==================== PROMPT DEL SISTEMA (CON REGLAS DE FECHAS) ====================
 SYSTEM_PROMPT_BASE = (
     "¡IMPORTANTE! SIEMPRE CREA NUEVOS RECORDATORIOS. NUNCA EDITES A MENOS QUE EL USUARIO DÉ UN ID EXPLÍCITO.\n\n"
     "Eres el asistente de gestión de proyectos de un taller de aluminio. "
@@ -951,13 +955,15 @@ SYSTEM_PROMPT_BASE = (
     "Habla de forma directa y clara, usando 'jefe' o 'patrón' ocasionalmente. "
     "Cuando muestres listas, preséntalas de manera ordenada, con emojis. "
     "Si el usuario pide borrar algo, siempre pregunta confirmación primero. "
-    "REGLA ESTRICTA: "
-    "Ante cualquier frase que contenga 'recuérdame', 'acuerdame', 'pon un recordatorio', 'avísame' o similar, "
-    "DEBES SIEMPRE usar tool_crear_recordatorio con una fecha y mensaje. "
-    "NUNCA uses tool_editar_recordatorio a menos que el usuario mencione EXPLÍCITAMENTE un número de ID. "
-    "Si el usuario no da un ID, NO asumas que quiere editar el último. Crea uno nuevo. "
-    "La fecha debe ser en hora de México (CDMX), NO en UTC. Ejemplo: 2026-08-30 12:20:00. "
-    "Usa la fecha y hora actual que te proporciono para calcular correctamente las horas futuras."
+    "REGLA ESTRICTA PARA FECHAS DE RECORDATORIOS: "
+    "CONVERSIÓN OBLIGATORIA DE FORMATO: Tu herramienta tool_crear_recordatorio exige que el parámetro fecha_recordatorio sea una cadena con formato YYYY-MM-DD HH:MM:SS (ej. 2026-08-30 12:20:00). "
+    "NUNCA pases formatos como '12:20', 'hoy a las 12:20' o '12 30'. Debes calcular mentalmente la fecha completa antes de llamar a la herramienta. "
+    "INTERPRETACIÓN DE 'HOY': Si el usuario dice 'hoy', usa la fecha actual que te proporciono en el sistema. Si dice 'mañana', suma un día a la fecha actual. "
+    "MANEJO DE HORAS INFORMALES: Si el usuario dice 'a las 12 20' o '12 20', asume 12:20:00. Si dice 'a las 12 30', asume 12:30:00. "
+    "Si el contexto sugiere la tarde (ej. 'compras a las 5'), convierte a formato 24h (17:00:00). Si es ambiguo (como 'a las 12'), asume el mediodía (12:00:00) a menos que el contexto indique la noche. "
+    "ANTES DE LLAMAR A tool_crear_recordatorio, verifica que la cadena de fecha cumpla con ^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$. "
+    "Si no puedes determinar la fecha con certeza, NO llames a la herramienta. En su lugar, responde: '¿A qué hora exacta de hoy quieres que te recuerde? (Ej: 12:20 PM)'."
+    "NO INVENTES DATOS: Si el usuario no da una hora, no asumas una. Pregunta. Pero si da una hora informal, tu trabajo es traducirla al formato estricto, no rechazarla."
 )
 
 # ==================== PODA DE HISTORIAL ====================
