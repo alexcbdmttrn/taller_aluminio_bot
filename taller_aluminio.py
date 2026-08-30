@@ -583,16 +583,50 @@ async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str
     await ejecutar_query(f"UPDATE clientes SET {', '.join(updates)} WHERE id = ${len(params)}", params)
     return {"exito": True, "mensaje": f"Datos actualizados correctamente para el cliente '{nombre_real}'."}
 
-# ===== RECORDATORIOS (CON VALIDACIÓN MEJORADA) =====
+# ===== RECORDATORIOS (CON FLEXIBILIDAD DE FORMATO) =====
+def normalizar_fecha(fecha_str: str) -> str:
+    """Limpia y normaliza una fecha/hora ingresada por el usuario o por la IA."""
+    # Reemplazar espacios entre dígitos de la hora (ej. "12 38" -> "12:38")
+    fecha_limpia = re.sub(r'(\d{1,2})\s+(\d{2})', r'\1:\2', fecha_str.strip())
+    # Si la hora tiene solo dos dígitos sin minutos, añadir ":00"
+    if re.match(r'^\d{4}-\d{2}-\d{2} \d{1,2}$', fecha_limpia):
+        fecha_limpia += ":00"
+    # Si la hora tiene tres dígitos (ej. "12 30" ya fue convertido a "12:30") no es necesario
+    return fecha_limpia
+
 async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id: int):
     try:
-        # Intentar parsear la fecha estricta
-        fecha_local = datetime.strptime(fecha_recordatorio, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        # Si falla, devolver error claro pidiendo el formato correcto
-        return {"exito": False, "error": f"⚠️ Formato de fecha inválido: '{fecha_recordatorio}'. Debe ser YYYY-MM-DD HH:MM:SS. Ejemplo: 2026-08-30 12:20:00"}
+        # Normalizar la fecha
+        fecha_limpia = normalizar_fecha(fecha_recordatorio)
+        logger.info(f"📥 Fecha recibida (cruda): {fecha_recordatorio} -> normalizada: {fecha_limpia}")
 
-    try:
+        # Intentar parsear con varios formatos
+        formatos = [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d %I:%M %p",
+            "%Y-%m-%d %I:%M%p",
+            "%Y-%m-%d %H",
+        ]
+        fecha_local = None
+        for fmt in formatos:
+            try:
+                fecha_local = datetime.strptime(fecha_limpia, fmt)
+                # Si no tiene segundos, agregarlos
+                if fmt == "%Y-%m-%d %H:%M":
+                    fecha_local = fecha_local.replace(second=0)
+                elif fmt == "%Y-%m-%d %H":
+                    fecha_local = fecha_local.replace(minute=0, second=0)
+                break
+            except ValueError:
+                continue
+
+        if not fecha_local:
+            return {
+                "exito": False,
+                "error": f"⚠️ Formato de fecha no reconocido: '{fecha_recordatorio}'. Usa YYYY-MM-DD HH:MM:SS (ej. 2026-08-30 12:20:00)"
+            }
+
         fecha_utc = local_a_utc(fecha_local)
         ahora_utc = datetime.utcnow()
         diferencia = (fecha_utc - ahora_utc).total_seconds()
@@ -653,29 +687,40 @@ async def tool_editar_recordatorio(
         updates.append(f"mensaje = ${len(params)+1}")
         params.append(nuevo_mensaje)
     if nueva_fecha:
-        try:
-            fecha_local = datetime.strptime(nueva_fecha, "%Y-%m-%d %H:%M:%S")
-            fecha_utc = local_a_utc(fecha_local)
-            ahora_utc = datetime.utcnow()
-            diferencia = (fecha_utc - ahora_utc).total_seconds()
-            if diferencia <= 180:
-                fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
-                hora_actual = ahora_cdmx().strftime("%I:%M %p")
-                return {
-                    "exito": False,
-                    "requiere_confirmacion": True,
-                    "fecha_local": fecha_mostrar,
-                    "mensaje": nuevo_mensaje or "Recordatorio",
-                    "error": f"⚠️ La nueva fecha ({fecha_mostrar}) es muy cercana o ya pasó. La hora actual en el sistema es {hora_actual}. ¿Quieres actualizarlo igualmente? Responde 'sí' para confirmar o 'no' para cancelar.",
-                    "id_recordatorio": id_recordatorio,
-                    "nuevo_mensaje": nuevo_mensaje,
-                    "nueva_fecha": nueva_fecha,
-                    "datos_originales": {"mensaje": nuevo_mensaje, "fecha_local": fecha_local, "fecha_utc": fecha_utc}
-                }
-            updates.append(f"fecha_recordatorio = ${len(params)+1}")
-            params.append(fecha_utc)
-        except ValueError:
+        fecha_limpia = normalizar_fecha(nueva_fecha)
+        formatos = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d %I:%M %p", "%Y-%m-%d %I:%M%p", "%Y-%m-%d %H"]
+        fecha_local = None
+        for fmt in formatos:
+            try:
+                fecha_local = datetime.strptime(fecha_limpia, fmt)
+                if fmt == "%Y-%m-%d %H:%M":
+                    fecha_local = fecha_local.replace(second=0)
+                elif fmt == "%Y-%m-%d %H":
+                    fecha_local = fecha_local.replace(minute=0, second=0)
+                break
+            except ValueError:
+                continue
+        if not fecha_local:
             return {"exito": False, "error": "Formato de fecha inválido. Usa YYYY-MM-DD HH:MM:SS."}
+        fecha_utc = local_a_utc(fecha_local)
+        ahora_utc = datetime.utcnow()
+        diferencia = (fecha_utc - ahora_utc).total_seconds()
+        if diferencia <= 180:
+            fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
+            hora_actual = ahora_cdmx().strftime("%I:%M %p")
+            return {
+                "exito": False,
+                "requiere_confirmacion": True,
+                "fecha_local": fecha_mostrar,
+                "mensaje": nuevo_mensaje or "Recordatorio",
+                "error": f"⚠️ La nueva fecha ({fecha_mostrar}) es muy cercana o ya pasó. La hora actual en el sistema es {hora_actual}. ¿Quieres actualizarlo igualmente? Responde 'sí' para confirmar o 'no' para cancelar.",
+                "id_recordatorio": id_recordatorio,
+                "nuevo_mensaje": nuevo_mensaje,
+                "nueva_fecha": nueva_fecha,
+                "datos_originales": {"mensaje": nuevo_mensaje, "fecha_local": fecha_local, "fecha_utc": fecha_utc}
+            }
+        updates.append(f"fecha_recordatorio = ${len(params)+1}")
+        params.append(fecha_utc)
     if not updates:
         return {"exito": False, "error": "No se enviaron datos para actualizar."}
     params.append(id_recordatorio)
@@ -870,12 +915,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_crear_recordatorio",
-            "description": "PROGRAMA UN NUEVO RECORDATORIO. SIEMPRE crea un ID nuevo. Se usa cuando el usuario dice 'recuérdame...', 'acuerdame...', etc. NUNCA uses tool_editar_recordatorio para crear uno nuevo.",
+            "description": "PROGRAMA UN NUEVO RECORDATORIO. SIEMPRE crea un ID nuevo. Se usa cuando el usuario dice 'recuérdame...', 'acuerdame...', etc. NUNCA uses tool_editar_recordatorio para crear uno nuevo. Acepta formatos flexibles de fecha y hora.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "mensaje": {"type": "string", "description": "Texto del recordatorio"},
-                    "fecha_recordatorio": {"type": "string", "description": "Fecha y hora exacta en formato YYYY-MM-DD HH:MM:SS (hora de México, NO UTC). Ejemplo: 2026-08-30 12:20:00"}
+                    "fecha_recordatorio": {"type": "string", "description": "Fecha y hora en formato YYYY-MM-DD HH:MM:SS (puedes usar horas informales como '12 20' o '12:20'). Ejemplo: 2026-08-30 12:20:00"}
                 },
                 "required": ["mensaje", "fecha_recordatorio"]
             },
@@ -1356,18 +1401,19 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"❌ Error en checar_recordatorios: {e}")
 
-# ==================== INICIO ====================
-async def recordatorio_loop(app):
-    while True:
-        await checar_recordatorios(app)
-        await asyncio.sleep(60)
+# ==================== INICIO (CORREGIDO CON post_init) ====================
+async def post_init(app):
+    """Inicialización asíncrona de la base de datos."""
+    await init_db_pool()
+    await crear_tablas()
 
 def main():
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(init_db_pool())
-    loop.run_until_complete(crear_tablas())
-
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
@@ -1378,10 +1424,9 @@ def main():
         job_queue.run_repeating(checar_recordatorios, interval=60, first=10)
         logger.info("✅ JobQueue para recordatorios iniciado (cada 60s).")
     else:
-        logger.warning("⚠️ JobQueue no disponible. Usando bucle de respaldo.")
-        asyncio.create_task(recordatorio_loop(app))
+        logger.warning("⚠️ JobQueue no disponible. Los recordatorios no se enviarán automáticamente. Instala `pip install python-telegram-bot[job-queue]` si los necesitas.")
 
-    logger.info("🤖 Bot iniciado con validación de fechas mejorada y manejo de ambigüedades.")
+    logger.info("🤖 Bot iniciado correctamente (con manejo flexible de fechas).")
     app.run_polling()
 
 if __name__ == "__main__":
