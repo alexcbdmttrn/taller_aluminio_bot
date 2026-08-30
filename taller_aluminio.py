@@ -1203,7 +1203,7 @@ SYSTEM_PROMPT_BASE = (
     "Cuando el usuario pida un recordatorio, pasa la fecha y hora tal como las mencionó "
     "al parámetro fecha_recordatorio. NO intentes convertir a formato 24h tú mismo. "
     "La herramienta se encarga. Si la herramienta devuelve ambigüedad AM/PM, repregunta al usuario. "
-    "Cuando el usuario aclare (ej: 'madrugada', 'de la tarde'), combina esa aclaración "
+    "Cuando el usuario aclare (ej: 'madrugada', 'de la tarde', 'pm'), combina esa aclaración "
     "con la fecha original y vuelve a llamar a tool_crear_recordatorio con la frase completa. "
     "NUNCA guardes un recordatorio sin que la herramienta confirme éxito."
 )
@@ -1327,9 +1327,6 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                     await update.message.reply_text("⚠️ Conversación muy larga. Escribe /start para reiniciar.")
                 else:
                     await update.message.reply_text(f"❌ Error: {error_msg[:100]}")
-                context.user_data["confirmacion_pendiente"] = None
-                context.user_data["esperando_seleccion"] = None
-                context.user_data["esperando_aclaracion_fecha"] = None
                 return
 
             message = response.choices[0].message
@@ -1408,26 +1405,10 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                         })
 
                 if result.get("requiere_aclaracion_fecha"):
-                    context.user_data["esperando_aclaracion_fecha"] = {
-                        "mensaje_original": result.get("mensaje_original", ""),
-                        "fecha_ambigua": result.get("fecha_ambigua", ""),
-                        "chat_id": chat_id,
-                    }
                     await update.message.reply_text(result.get("error", "¿AM o PM?"))
                     return
 
                 if result.get("requiere_confirmacion"):
-                    context.user_data["confirmacion_pendiente"] = {
-                        "tool_name": function_name,
-                        "args_originales": function_args,
-                        "fecha_mostrar": result.get("fecha_local"),
-                        "mensaje": result.get("mensaje"),
-                        "chat_id": chat_id,
-                        "datos_originales": result.get("datos_originales"),
-                        "id_recordatorio": result.get("id_recordatorio"),
-                        "nuevo_mensaje": result.get("nuevo_mensaje"),
-                        "nueva_fecha": result.get("nueva_fecha")
-                    }
                     await update.message.reply_text(
                         f"{result.get('error')}\n\nResponde 'sí', 'mañana' o 'no'."
                     )
@@ -1440,12 +1421,6 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                         mensaje_opciones += f"{idx_op}. {opcion}\n"
                     mensaje_opciones += "\nResponde con el número o nombre del proyecto."
                     await update.message.reply_text(mensaje_opciones, parse_mode="Markdown")
-                    context.user_data["esperando_seleccion"] = {
-                        "tool_name": function_name,
-                        "args_originales": function_args,
-                        "opciones": opciones,
-                        "cliente": function_args.get("cliente", ""),
-                    }
                     return
 
                 if result.get("exito") is False:
@@ -1467,224 +1442,11 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
             pass
 
 
-# ==================== MANEJO DE ACLARACIÓN DE FECHA (AM/PM) ====================
-async def manejar_aclaracion_fecha(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
-    """Cuando el usuario aclara AM/PM, combina con la fecha original y guarda directamente."""
-    try:
-        datos = context.user_data.get("esperando_aclaracion_fecha")
-        if not datos:
-            return False
-
-        mensaje_original = datos.get("mensaje_original", "")
-        fecha_ambigua = datos.get("fecha_ambigua", "")
-        chat_id = datos.get("chat_id", update.effective_chat.id)
-
-        texto_combinado = f"{fecha_ambigua} {texto}"
-        logger.info(f"🔄 Combinando fecha: '{fecha_ambigua}' + '{texto}' = '{texto_combinado}'")
-
-        fecha_normalizada, ambiguedad, fecha_local = interpretar_fecha(texto_combinado)
-
-        if ambiguedad:
-            await update.message.reply_text(f"⚠️ {ambiguedad}")
-            return True
-
-        if not fecha_local:
-            await update.message.reply_text("⚠️ No entendí la hora. Usa formato numérico (ej: '3:30 AM').")
-            context.user_data["esperando_aclaracion_fecha"] = None
-            return True
-
-        fecha_utc = local_a_utc(fecha_local)
-        ahora_utc = datetime.utcnow()
-        diferencia = (fecha_utc - ahora_utc).total_seconds()
-
-        if diferencia < -120:
-            fecha_local = fecha_local + timedelta(days=1)
-            fecha_utc = local_a_utc(fecha_local)
-
-        query = """
-            INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado)
-            VALUES ($1, $2, $3, FALSE) RETURNING id
-        """
-        await ejecutar_query(query, (chat_id, mensaje_original, fecha_utc), fetch=True)
-        fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
-        mensaje_respuesta = f"✅ Recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje_original}*"
-        await guardar_historial(chat_id, {"role": "assistant", "content": mensaje_respuesta})
-        await update.message.reply_text(mensaje_respuesta, parse_mode="Markdown")
-
-        context.user_data["esperando_aclaracion_fecha"] = None
-        return True
-
-    except Exception as e:
-        logger.error(f"❌ Error en manejar_aclaracion_fecha: {e}", exc_info=True)
-        await update.message.reply_text("⚠️ Error procesando la aclaración. Intenta de nuevo.")
-        context.user_data["esperando_aclaracion_fecha"] = None
-        return True
-
-
-# ==================== MANEJO DE CONFIRMACIÓN ====================
-async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
-    try:
-        confirmacion = context.user_data.get("confirmacion_pendiente")
-        if not confirmacion:
-            return False
-
-        texto_lower = texto.lower()
-        palabras_afirmativas = ["sí", "si", "yes", "y", "dale", "ok", "confirmo", "confirmar", "programa", "programar", "adelante"]
-        es_afirmativo = any(p in texto_lower for p in palabras_afirmativas)
-        es_manana = "mañana" in texto_lower or "manana" in texto_lower
-
-        if es_afirmativo or es_manana:
-            tool_name = confirmacion["tool_name"]
-            chat_id = confirmacion["chat_id"]
-            datos = confirmacion.get("datos_originales")
-
-            if not datos or "fecha_utc" not in datos:
-                await update.message.reply_text("⚠️ No pude entender la fecha. Repite tu petición.")
-                context.user_data["confirmacion_pendiente"] = None
-                return True
-
-            if es_manana and "fecha_local" in datos:
-                try:
-                    fecha_local_str = datos["fecha_local"]
-                    if isinstance(fecha_local_str, str):
-                        fecha_local = datetime.fromisoformat(fecha_local_str)
-                    else:
-                        fecha_local = fecha_local_str
-                    fecha_local = fecha_local + timedelta(days=1)
-                    fecha_utc = local_a_utc(fecha_local)
-                    datos["fecha_local"] = fecha_local.isoformat()
-                    datos["fecha_utc"] = fecha_utc.isoformat()
-                except Exception as e:
-                    logger.error(f"Error ajustando fecha a mañana: {e}")
-
-            if tool_name == "tool_crear_recordatorio" and datos:
-                mensaje = datos["mensaje"]
-                try:
-                    fecha_utc_str = datos["fecha_utc"]
-                    if isinstance(fecha_utc_str, str):
-                        fecha_utc = datetime.fromisoformat(fecha_utc_str)
-                    else:
-                        fecha_utc = fecha_utc_str
-                    fecha_local_str = datos["fecha_local"]
-                    if isinstance(fecha_local_str, str):
-                        fecha_local = datetime.fromisoformat(fecha_local_str)
-                    else:
-                        fecha_local = fecha_local_str
-                except Exception as e:
-                    logger.error(f"Error parseando fechas: {e}")
-                    await update.message.reply_text("⚠️ Error con la fecha. Intenta de nuevo.")
-                    context.user_data["confirmacion_pendiente"] = None
-                    return True
-
-                query = """
-                    INSERT INTO recordatorios (chat_id, mensaje, fecha_recordatorio, enviado)
-                    VALUES ($1, $2, $3, FALSE) RETURNING id
-                """
-                await ejecutar_query(query, (chat_id, mensaje, fecha_utc), fetch=True)
-                fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
-                mensaje_respuesta = f"✅ Recordatorio programado para el {fecha_mostrar}.\n\n📝 *{mensaje}*"
-                await guardar_historial(chat_id, {"role": "assistant", "content": mensaje_respuesta})
-                await update.message.reply_text(mensaje_respuesta, parse_mode="Markdown")
-            else:
-                args = confirmacion["args_originales"]
-                args["chat_id"] = chat_id
-                tool_func = TOOL_FUNCTIONS.get(tool_name)
-                if tool_func:
-                    try:
-                        result = await tool_func(**args)
-                        if result.get("exito"):
-                            await update.message.reply_text(f"✅ {result.get('mensaje', 'Acción completada.')}")
-                        else:
-                            await update.message.reply_text(f"❌ {result.get('error', 'Error.')}")
-                    except Exception as e:
-                        await update.message.reply_text(f"❌ Error: {str(e)}")
-            context.user_data["confirmacion_pendiente"] = None
-            return True
-        else:
-            context.user_data["confirmacion_pendiente"] = None
-            await update.message.reply_text("❌ Cancelado.")
-            return True
-
-    except Exception as e:
-        logger.error(f"❌ Error en manejar_confirmacion: {e}", exc_info=True)
-        await update.message.reply_text("⚠️ Error procesando confirmación.")
-        context.user_data["confirmacion_pendiente"] = None
-        return True
-
-
-# ==================== MANEJO DE SELECCIÓN ====================
-async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
-    try:
-        seleccion_data = context.user_data.get("esperando_seleccion")
-        if not seleccion_data:
-            return False
-
-        tool_name = seleccion_data["tool_name"]
-        args_originales = seleccion_data["args_originales"]
-        opciones = seleccion_data["opciones"]
-        seleccionado = None
-        texto_limpio = texto.strip().lower()
-
-        if texto_limpio.isdigit():
-            idx = int(texto_limpio) - 1
-            if 0 <= idx < len(opciones):
-                seleccionado = opciones[idx]
-                match = re.search(r"'([^']+)'", seleccionado)
-                if match:
-                    args_originales["nombre_corto"] = match.group(1)
-        else:
-            for opcion in opciones:
-                match = re.search(r"'([^']+)'", opcion)
-                if match:
-                    nombre_opcion = match.group(1).lower()
-                    if nombre_opcion in texto_limpio or texto_limpio in nombre_opcion:
-                        args_originales["nombre_corto"] = match.group(1)
-                        seleccionado = opcion
-                        break
-
-        if not seleccionado:
-            await update.message.reply_text(
-                f"⚠️ No entendí. Las opciones son:\n\n" +
-                "\n".join([f"{i+1}. {op}" for i, op in enumerate(opciones)]) +
-                "\n\nResponde con el número o nombre."
-            )
-            return True
-
-        context.user_data["esperando_seleccion"] = None
-        tool_func = TOOL_FUNCTIONS.get(tool_name)
-        if not tool_func:
-            await update.message.reply_text("❌ Error: herramienta no encontrada.")
-            return True
-
-        try:
-            result = await tool_func(**args_originales)
-            chat_id = update.effective_chat.id
-            if result.get("exito"):
-                texto_resultado = f"✅ {result.get('mensaje', 'Completado.')}"
-            else:
-                texto_resultado = f"❌ {result.get('error', 'Error.')}"
-            await guardar_historial(chat_id, {"role": "assistant", "content": texto_resultado})
-            await update.message.reply_text(texto_resultado)
-        except Exception as e:
-            logger.error(f"Error ejecutando tool: {e}")
-            await update.message.reply_text(f"❌ Error: {str(e)}")
-
-        return True
-
-    except Exception as e:
-        logger.error(f"❌ Error en manejar_seleccion: {e}", exc_info=True)
-        await update.message.reply_text("⚠️ Error procesando selección.")
-        return True
-
-
 # ==================== MANEJADORES ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
         await limpiar_historial(chat_id)
-        context.user_data["esperando_seleccion"] = None
-        context.user_data["confirmacion_pendiente"] = None
-        context.user_data["esperando_aclaracion_fecha"] = None
         await update.message.reply_text(
             "¡Hola, jefe! 🛠️ Soy su asistente.\n\n"
             "Puedo ayudarle a:\n"
@@ -1705,34 +1467,8 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Válvula de escape
         if any(palabra in texto_lower for palabra in ["cancelar", "olvida", "reiniciar", "basta", "no importa"]):
-            context.user_data["confirmacion_pendiente"] = None
-            context.user_data["esperando_seleccion"] = None
-            context.user_data["esperando_aclaracion_fecha"] = None
+            await limpiar_historial(update.effective_chat.id)
             await update.message.reply_text("✅ Operación cancelada. ¿En qué más te ayudo?")
-            return
-
-        # PRIORIDAD 1: Aclaración de fecha (AM/PM)
-        if context.user_data.get("esperando_aclaracion_fecha"):
-            if update.message.text:
-                await manejar_aclaracion_fecha(update, context, update.message.text)
-            else:
-                await update.message.reply_text("⚠️ Responde 'AM', 'PM', 'mañana' o 'tarde'.")
-            return
-
-        # PRIORIDAD 2: Confirmación
-        if context.user_data.get("confirmacion_pendiente"):
-            if update.message.text:
-                await manejar_confirmacion(update, context, update.message.text)
-            else:
-                await update.message.reply_text("⚠️ Responde 'sí', 'mañana' o 'no'.")
-            return
-
-        # PRIORIDAD 3: Selección
-        if context.user_data.get("esperando_seleccion"):
-            if update.message.text:
-                await manejar_seleccion(update, context, update.message.text)
-            else:
-                await update.message.reply_text("⚠️ Responde con texto para seleccionar.")
             return
 
         # Normal: procesar mensaje
@@ -1759,9 +1495,6 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"❌ Error en handler: {e}", exc_info=True)
-        context.user_data["confirmacion_pendiente"] = None
-        context.user_data["esperando_seleccion"] = None
-        context.user_data["esperando_aclaracion_fecha"] = None
         try:
             await update.message.reply_text("⚠️ Error. Intenta de nuevo.")
         except:
@@ -1816,7 +1549,7 @@ def main():
     else:
         logger.warning("⚠️ JobQueue no disponible.")
 
-    logger.info("🤖 Bot iniciado con todas las correcciones.")
+    logger.info("🤖 Bot iniciado con arquitectura correcta: TODO pasa por DeepSeek.")
     app.run_polling()
 
 
