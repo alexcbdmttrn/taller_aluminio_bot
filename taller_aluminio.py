@@ -263,7 +263,7 @@ async def obtener_proyectos_activos(cliente_nombre):
     return await ejecutar_query(query, (f"%{cliente_nombre}%",), fetch=True)
 
 
-# ==================== DESAMBIGUACIÓN ====================
+# ==================== DESAMBIGUACIÓN (A PRUEBA DE BALAS) ====================
 async def _resolver_proyecto_o_pedir(
     cliente: str,
     nombre_corto: Optional[str],
@@ -272,6 +272,11 @@ async def _resolver_proyecto_o_pedir(
 ) -> Tuple[Optional[Dict], Optional[Dict]]:
     if not proyectos:
         return None, {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
+    
+    # DEFENSA 1: Si solo hay 1 proyecto, úsalo directo. Ignora si la IA inventó un nombre_corto como "Anticipo".
+    if len(proyectos) == 1:
+        return proyectos[0], None
+
     if nombre_corto:
         coincidencias = [
             p for p in proyectos if nombre_corto.lower() in (p["nombre_corto"] or "").lower()
@@ -289,9 +294,20 @@ async def _resolver_proyecto_o_pedir(
             if len(coincidencias) > 1:
                 proyectos = coincidencias
             else:
-                return None, {"exito": False, "error": f"No encontré proyecto para '{nombre_corto}' en {cliente}."}
+                if len(proyectos) == 1:
+                    return proyectos[0], None
+                    
+                opciones = [f"'{p['nombre_corto'] or 'General'}'" for p in proyectos]
+                return None, {
+                    "exito": False,
+                    "requiere_seleccion": True,
+                    "opciones": opciones,
+                    "error": f"No encontré el proyecto '{nombre_corto}' para {cliente}. Las opciones activas son: {', '.join(opciones)}.",
+                }
+    
     if len(proyectos) == 1:
         return proyectos[0], None
+        
     opciones = []
     for p in proyectos:
         nombre = p["nombre_corto"] or "Proyecto"
@@ -302,7 +318,7 @@ async def _resolver_proyecto_o_pedir(
         "exito": False,
         "requiere_seleccion": True,
         "opciones": opciones,
-        "error": f"{cliente} tiene {len(proyectos)} proyectos activos. Pregunta cuál y vuelve a llamar con 'nombre_corto'.",
+        "error": f"{cliente} tiene {len(proyectos)} proyectos activos. Por favor, especifica cuál: {', '.join([p['nombre_corto'] or 'General' for p in proyectos])}.",
     }
 
 
@@ -335,12 +351,37 @@ async def tool_registrar_proyecto(
 async def tool_registrar_pago(cliente: str, monto: float, referencia: str = None):
     if monto <= 0:
         return {"exito": False, "error": "El monto debe ser mayor a cero."}
+    
     proyectos = await obtener_proyectos_activos(cliente)
+    
+    # DEFENSA 2: Búsqueda de rescate. Si la IA extrajo mal el nombre (ej: "lo que faltaba"), busca en todos los activos.
     if not proyectos:
-        return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
+        query_todos = """
+            SELECT c.nombre, p.nombre_corto, p.id, p.monto_total, p.monto_pagado, p.estado
+            FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
+            WHERE p.estado NOT IN ('Liquidado', 'Cancelado')
+        """
+        todos = await ejecutar_query(query_todos, fetch=True)
+        cliente_lower = cliente.lower().strip()
+        posibles = [
+            p for p in todos 
+            if cliente_lower in p["nombre"].lower() or cliente_lower in (p["nombre_corto"] or "").lower()
+        ]
+        
+        if len(posibles) == 1:
+            cliente = posibles[0]["nombre"]
+            proyectos = await obtener_proyectos_activos(cliente)
+        elif len(posibles) > 1:
+            opciones = [f"{p['nombre']} ({p['nombre_corto'] or 'General'})" for p in posibles]
+            return {"exito": False, "requiere_seleccion": True, "opciones": opciones, "error": f"Encontré varios proyectos que podrían coincidir con '{cliente}'. ¿A cuál te refieres? {', '.join(opciones)}"}
+        else:
+            lista_activos = [f"{p['nombre']} ({p['nombre_corto'] or 'General'})" for p in todos[:5]]
+            return {"exito": False, "error": f"No encontré proyectos activos para '{cliente}'. Proyectos activos en el sistema: {', '.join(lista_activos) if lista_activos else 'Ninguno'}."}
+
     proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, referencia, proyectos, "registrar pago")
     if aviso:
         return aviso
+        
     pid = proyecto["id"]
     nc = proyecto["nombre_corto"]
     total = proyecto["monto_total"]
@@ -351,6 +392,7 @@ async def tool_registrar_pago(cliente: str, monto: float, referencia: str = None
     nuevo_estado = "Liquidado" if saldo == 0 else "Por cobrar"
     if monto > 0 and estado == "Pendiente de cotizar":
         nuevo_estado = "En proceso"
+        
     await ejecutar_query(
         "UPDATE proyectos SET monto_pagado = $1, estado = $2 WHERE id = $3",
         (float(nuevo_pagado), nuevo_estado, pid),
@@ -370,9 +412,11 @@ async def tool_marcar_presupuesto_enviado(
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
+        
     proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "marcar presupuesto enviado")
     if aviso:
         return aviso
+        
     pid = proyecto["id"]
     nc = proyecto["nombre_corto"]
     estado_actual = proyecto["estado"]
@@ -402,11 +446,25 @@ async def tool_registrar_compra_material(
     costo: float = None,
 ):
     proyectos = await obtener_proyectos_activos(cliente)
+    
+    # DEFENSA 2: Búsqueda de rescate
     if not proyectos:
-        return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
+        query_todos = """
+            SELECT c.nombre, p.nombre_corto, p.id FROM proyectos p JOIN clientes c ON p.cliente_id = c.id WHERE p.estado NOT IN ('Liquidado', 'Cancelado')
+        """
+        todos = await ejecutar_query(query_todos, fetch=True)
+        cliente_lower = cliente.lower().strip()
+        posibles = [p for p in todos if cliente_lower in p["nombre"].lower() or cliente_lower in (p["nombre_corto"] or "").lower()]
+        if len(posibles) == 1:
+            cliente = posibles[0]["nombre"]
+            proyectos = await obtener_proyectos_activos(cliente)
+        else:
+            return {"exito": False, "error": f"No hay proyectos activos para '{cliente}'."}
+
     proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "registrar compra de material")
     if aviso:
         return aviso
+        
     pid = proyecto["id"]
     nc = proyecto["nombre_corto"]
     await ejecutar_query("""
@@ -482,11 +540,30 @@ async def tool_consultar_proyectos(tipo: str = "activos", cliente: str = None):
 
 async def tool_cerrar_proyecto(cliente: str, nombre_corto: str = None):
     proyectos = await obtener_proyectos_activos(cliente)
+    
+    # DEFENSA 2: Búsqueda de rescate
     if not proyectos:
-        return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
+        query_todos = """
+            SELECT c.nombre, p.nombre_corto, p.id, p.monto_total, p.monto_pagado, p.estado
+            FROM proyectos p JOIN clientes c ON p.cliente_id = c.id
+            WHERE p.estado NOT IN ('Liquidado', 'Cancelado')
+        """
+        todos = await ejecutar_query(query_todos, fetch=True)
+        cliente_lower = cliente.lower().strip()
+        posibles = [p for p in todos if cliente_lower in p["nombre"].lower() or cliente_lower in (p["nombre_corto"] or "").lower()]
+        if len(posibles) == 1:
+            cliente = posibles[0]["nombre"]
+            proyectos = await obtener_proyectos_activos(cliente)
+        elif len(posibles) > 1:
+            opciones = [f"{p['nombre']} ({p['nombre_corto'] or 'General'})" for p in posibles]
+            return {"exito": False, "requiere_seleccion": True, "opciones": opciones, "error": f"Encontré varios proyectos. ¿A cuál te refieres? {', '.join(opciones)}"}
+        else:
+            return {"exito": False, "error": f"No hay proyectos activos para '{cliente}'."}
+
     proyecto, aviso = await _resolver_proyecto_o_pedir(cliente, nombre_corto, proyectos, "cerrar/liquidar proyecto")
     if aviso:
         return aviso
+        
     pid = proyecto["id"]
     nc = proyecto["nombre_corto"]
     total = proyecto["monto_total"]
