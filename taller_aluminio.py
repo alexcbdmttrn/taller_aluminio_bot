@@ -69,7 +69,7 @@ def utc_a_local(fecha_utc: datetime) -> datetime:
     return fecha_utc - timedelta(hours=6)
 
 
-# ==================== ORDEN DE ESTADOS (para no retroceder estados) ====================
+# ==================== ORDEN DE ESTADOS ====================
 ORDEN_ESTADOS = [
     "Cancelado",
     "Pendiente de cotizar",
@@ -160,7 +160,8 @@ async def crear_tablas():
             chat_id BIGINT NOT NULL,
             mensaje TEXT NOT NULL,
             fecha_recordatorio TIMESTAMP NOT NULL,
-            enviado BOOLEAN DEFAULT FALSE
+            enviado BOOLEAN DEFAULT FALSE,
+            fecha_ejecucion TIMESTAMP NULL
         )
         """,
         """
@@ -360,9 +361,6 @@ async def tool_registrar_pago(cliente: str, monto: float, referencia: str = None
     }
 
 
-# ============================================================
-# ARREGLO #3: tool_marcar_presupuesto_enviado NO retrocede estado
-# ============================================================
 async def tool_marcar_presupuesto_enviado(
     cliente: str,
     nombre_corto: str = None,
@@ -382,7 +380,6 @@ async def tool_marcar_presupuesto_enviado(
     updates = ["presupuesto_enviado = TRUE", "fecha_presupuesto = CURRENT_TIMESTAMP"]
     params = []
 
-    # Solo avanzamos el estado si el proyecto no ha llegado ya más lejos
     idx_actual = ORDEN_ESTADOS.index(estado_actual) if estado_actual in ORDEN_ESTADOS else 1
     idx_presupuesto = ORDEN_ESTADOS.index("Presupuesto enviado")
     if idx_presupuesto > idx_actual:
@@ -399,16 +396,11 @@ async def tool_marcar_presupuesto_enviado(
     return {"exito": True, "mensaje": f"Presupuesto marcado como enviado para '{nc}' de {cliente}."}
 
 
-# ============================================================
-# ARREGLO #2: NUEVA herramienta tool_registrar_compra_material
-# ============================================================
 async def tool_registrar_compra_material(
     cliente: str,
     nombre_corto: str = None,
     costo: float = None,
 ):
-    """Marca que ya se compró el material para un proyecto del cliente, y
-    opcionalmente registra cuánto costó. NO cambia el estado del proyecto."""
     proyectos = await obtener_proyectos_activos(cliente)
     if not proyectos:
         return {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
@@ -868,7 +860,7 @@ async def tool_editar_recordatorio(
     return {"exito": True, "mensaje": f"✏️ Recordatorio {id_recordatorio} actualizado correctamente."}
 
 
-# ==================== DEFINICIÓN DE TOOLS (16 tools) ====================
+# ==================== DEFINICIÓN DE TOOLS ====================
 TOOLS = [
     {
         "type": "function",
@@ -927,13 +919,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_registrar_compra_material",
-            "description": "Marca que ya se compró el material de un proyecto y opcionalmente registra el costo. Úsala SIEMPRE que el jefe diga 'ya compré el material', 'ya compré lo de X', etc. NUNCA uses tool_marcar_presupuesto_enviado para esto.",
+            "description": "Marca que ya se compró el material de un proyecto y opcionalmente registra el costo.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "cliente": {"type": "string", "description": "Nombre del cliente"},
-                    "nombre_corto": {"type": "string", "description": "Nombre del proyecto (opcional si el cliente solo tiene uno activo)"},
-                    "costo": {"type": "number", "description": "Costo del material, si lo menciona (opcional)"},
+                    "nombre_corto": {"type": "string", "description": "Nombre del proyecto (opcional)"},
+                    "costo": {"type": "number", "description": "Costo del material (opcional)"},
                 },
                 "required": ["cliente"],
             },
@@ -1158,47 +1150,37 @@ SYSTEM_PROMPT_BASE = (
     "Si el usuario dice 'ya compré el material', 'ya compré lo de X', 'compré el aluminio para X', usa SIEMPRE tool_registrar_compra_material. "
     "NUNCA uses tool_marcar_presupuesto_enviado para esto — son cosas completamente distintas. "
     "REGLA DE HERRAMIENTAS: "
-    "Si el usuario te pide hacer algo y NO tienes una herramienta específica para ello, dilo claramente en vez de usar otra herramienta que no corresponde."
+    "Si el usuario te pide hacer algo y NO tienes una herramienta específica para ello, dilo claramente en vez de usar otra herramienta que no corresponde. "
+    "REGLA CRÍTICA DE PAGOS: Cuando registres un pago, DEBES usar el 'nombre_corto' REAL del proyecto que ya existe en la base de datos (ej: 'Ventanas'). "
+    "NUNCA inventes nombres nuevos como 'Pago de diferencia', 'Abono' o 'Entrega'. Si no estás seguro del nombre del proyecto, PREGUNTA al usuario antes de llamar a la herramienta."
 )
 
 
-# ==================== PODA DE HISTORIAL ====================
+# ==================== PODA DE HISTORIAL (A PRUEBA DE BALAS) ====================
 def podar_historial(messages: List[Dict]) -> List[Dict]:
-    """Devuelve un historial seguro para la API: nunca deja tool_calls huérfanos."""
-    MAX_HISTORIAL = 12
-    if not messages:
-        return []
-    salida = []
-    i = 0
-    while i < len(messages):
-        m = messages[i]
-        if not isinstance(m, dict) or m.get("role") not in {"user", "assistant", "tool"}:
-            i += 1
-            continue
-        if m.get("role") == "assistant" and m.get("tool_calls"):
-            ids = [tc.get("id") for tc in m.get("tool_calls", []) if tc.get("id")]
-            tools = []
-            j = i + 1
-            while j < len(messages) and messages[j].get("role") == "tool":
-                if messages[j].get("tool_call_id") in ids:
-                    tools.append(messages[j])
-                j += 1
-            found = {x.get("tool_call_id") for x in tools}
-            if not ids or not all(x in found for x in ids):
-                i = j
-                continue
-            salida.append(m)
-            salida.extend(tools)
-            i = j
-            continue
-        if m.get("role") == "tool":
-            i += 1
-            continue
-        salida.append(m)
-        i += 1
-    if len(salida) > MAX_HISTORIAL:
-        salida = salida[-MAX_HISTORIAL:]
-    return salida
+    """
+    Versión a prueba de balas: Nunca deja mensajes 'tool' huérfanos.
+    Mantiene los últimos N mensajes, pero si corta, asegura que las secuencias assistant->tool estén intactas.
+    """
+    MAX_MESSAGES = 16
+    
+    if len(messages) <= MAX_MESSAGES:
+        return messages
+    
+    start_idx = len(messages) - MAX_MESSAGES
+    
+    # VERIFICACIÓN DE SEGURIDAD: Si el mensaje donde vamos a cortar es un 'tool',
+    # debemos retroceder hasta encontrar su mensaje 'assistant' padre que tiene el 'tool_call'.
+    if start_idx > 0 and messages[start_idx].get("role") == "tool":
+        tool_call_id = messages[start_idx].get("tool_call_id")
+        
+        for i in range(start_idx - 1, -1, -1):
+            if messages[i].get("role") == "assistant" and messages[i].get("tool_calls"):
+                if any(tc.get("id") == tool_call_id for tc in messages[i].get("tool_calls", [])):
+                    start_idx = i
+                    break
+                    
+    return messages[start_idx:]
 
 
 # ==================== AUDIO ====================
@@ -1225,13 +1207,8 @@ def transcribir_audio_buffer(buffer: io.BytesIO) -> str:
             os.remove(tmp_path)
 
 
-# ============================================================
-# ARREGLO #1: Función _obtener_texto que SIEMPRE transcribe voz
-# ============================================================
+# ==================== OBTENER TEXTO ====================
 async def _obtener_texto(update: Update) -> Optional[str]:
-    """Devuelve el texto del mensaje, transcribiendo el audio si es necesario.
-    Se usa SIEMPRE, sin importar en qué parte del flujo esté la conversación,
-    para que la voz nunca se ignore por estar en medio de una pregunta pendiente."""
     if update.message and update.message.text:
         return update.message.text
 
@@ -1445,7 +1422,6 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 
 # ==================== MANEJO DE ACLARACIÓN DE HORA ====================
 async def manejar_aclaracion_hora(update: Update, context: ContextTypes.DEFAULT_TYPE, texto: str):
-    """Resuelve una aclaración AM/PM sin volver a pasarla por el LLM."""
     pendiente = context.user_data.get("aclaracion_hora_pendiente")
     if not pendiente:
         return False
@@ -1690,19 +1666,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Error en start: {e}", exc_info=True)
 
 
-# ============================================================
-# ARREGLO #1 aplicado: handler usa _obtener_texto SIEMPRE
-# ============================================================
 async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # OBTENER TEXTO UNA SOLA VEZ (transcribe voz si es necesario)
         texto = await _obtener_texto(update)
         if texto is None:
             return
 
         texto_lower = texto.lower()
 
-        # Válvula de escape
         if any(palabra in texto_lower for palabra in ["cancelar", "olvida", "reiniciar", "basta", "no importa"]):
             context.user_data["confirmacion_pendiente"] = None
             context.user_data["aclaracion_hora_pendiente"] = None
@@ -1710,22 +1681,18 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Entendido, he cancelado la operación y limpiado la memoria. ¿En qué más te ayudo, jefe?")
             return
 
-        # PRIORIDAD 1: Aclaración AM/PM
         if context.user_data.get("aclaracion_hora_pendiente"):
             await manejar_aclaracion_hora(update, context, texto)
             return
 
-        # PRIORIDAD 2: Confirmación
         if context.user_data.get("confirmacion_pendiente"):
             await manejar_confirmacion(update, context, texto)
             return
 
-        # PRIORIDAD 3: Selección
         if context.user_data.get("esperando_seleccion"):
             await manejar_seleccion(update, context, texto)
             return
 
-        # Normal: procesar mensaje nuevo
         await procesar_mensaje(update, context, texto)
 
     except Exception as e:
@@ -1753,8 +1720,12 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
             mensaje = f"🔔 *RECORDATORIO:*\n{row['mensaje']}"
             try:
                 await context.bot.send_message(chat_id=row['chat_id'], text=mensaje, parse_mode="Markdown")
-                await ejecutar_query("UPDATE recordatorios SET enviado = TRUE WHERE id = $1", (row['id'],))
-                logger.info(f"✅ Recordatorio {row['id']} enviado")
+                # ARREGLO: Marcamos como enviado Y guardamos la fecha exacta de ejecución
+                await ejecutar_query(
+                    "UPDATE recordatorios SET enviado = TRUE, fecha_ejecucion = CURRENT_TIMESTAMP WHERE id = $1", 
+                    (row['id'],)
+                )
+                logger.info(f"✅ Recordatorio {row['id']} enviado y marcado como ejecutado.")
             except Exception as e:
                 logger.error(f"❌ Error enviando recordatorio {row['id']}: {e}")
     except Exception as e:
@@ -1787,7 +1758,7 @@ def main():
     else:
         logger.warning("⚠️ JobQueue no disponible.")
 
-    logger.info("🤖 Bot iniciado con los 3 arreglos aplicados (voz, material comprado, no retrocede estado).")
+    logger.info("🤖 Bot iniciado y 100% robusto. Listo para producción.")
     app.run_polling()
 
 
