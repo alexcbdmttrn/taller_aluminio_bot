@@ -273,7 +273,7 @@ async def _resolver_proyecto_o_pedir(
     if not proyectos:
         return None, {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
     
-    # DEFENSA 1: Si solo hay 1 proyecto, úsalo directo. Ignora si la IA inventó un nombre_corto como "Anticipo".
+    # DEFENSA 1: Si solo hay 1 proyecto, úsalo directo
     if len(proyectos) == 1:
         return proyectos[0], None
 
@@ -354,7 +354,7 @@ async def tool_registrar_pago(cliente: str, monto: float, referencia: str = None
     
     proyectos = await obtener_proyectos_activos(cliente)
     
-    # DEFENSA 2: Búsqueda de rescate. Si la IA extrajo mal el nombre (ej: "lo que faltaba"), busca en todos los activos.
+    # DEFENSA 2: Búsqueda de rescate
     if not proyectos:
         query_todos = """
             SELECT c.nombre, p.nombre_corto, p.id, p.monto_total, p.monto_pagado, p.estado
@@ -806,7 +806,7 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
     try:
         fecha_normalizada, ambiguedad, fecha_local = interpretar_fecha(fecha_recordatorio)
         if not fecha_normalizada or not fecha_local:
-            return {"exito": False, "error": ambiguedad or f"⚠️ No pude interpretar la fecha: '{fecha_recordatorio}'."}
+            return {"exito": False, "error": ambiguedad or f"️ No pude interpretar la fecha: '{fecha_recordatorio}'."}
 
         fecha_utc = local_a_utc(fecha_local)
         ahora_utc = datetime.utcnow()
@@ -1520,7 +1520,7 @@ async def manejar_aclaracion_hora(update: Update, context: ContextTypes.DEFAULT_
     fecha_normalizada, ambiguedad, fecha_local = interpretar_fecha(fecha_completa)
 
     if not fecha_local:
-        await update.message.reply_text(f"⚠️ No pude convertir esa hora. {ambiguedad or 'Dime la hora otra vez.'}")
+        await update.message.reply_text(f"️ No pude convertir esa hora. {ambiguedad or 'Dime la hora otra vez.'}")
         return True
 
     context.user_data.pop("aclaracion_hora_pendiente", None)
@@ -1581,7 +1581,7 @@ async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 _, _, fecha_local = interpretar_fecha(confirmacion.get("args_originales", {}).get("fecha_recordatorio", ""))
             if not fecha_local:
-                await update.message.reply_text("⚠️ Perdí la fecha del recordatorio. Vuelve a indicarme la hora.")
+                await update.message.reply_text("️ Perdí la fecha del recordatorio. Vuelve a indicarme la hora.")
                 context.user_data["confirmacion_pendiente"] = None
                 return True
 
@@ -1627,7 +1627,7 @@ async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYP
                 if fecha_local:
                     fecha_local += timedelta(days=1)
             if not fecha_local:
-                await update.message.reply_text("⚠️ No pude recuperar la hora original. Vuelve a indicarla, por favor.")
+                await update.message.reply_text("️ No pude recuperar la hora original. Vuelve a indicarla, por favor.")
                 context.user_data["confirmacion_pendiente"] = None
                 return True
             fecha_utc = local_a_utc(fecha_local)
@@ -1636,7 +1636,7 @@ async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYP
                 (chat_id, mensaje_original, fecha_utc)
             )
             fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
-            respuesta = f"✅ Recordatorio programado para mañana, {fecha_mostrar}.\n\n📝 *{mensaje_original}*"
+            respuesta = f"✅ Recordatorio programado para mañana, {fecha_mostrar}.\n\n *{mensaje_original}*"
             await guardar_historial(chat_id, {"role": "assistant", "content": respuesta})
             await update.message.reply_text(respuesta, parse_mode="Markdown")
             context.user_data["confirmacion_pendiente"] = None
@@ -1693,7 +1693,7 @@ async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         context.user_data["esperando_seleccion"] = None
         tool_func = TOOL_FUNCTIONS.get(tool_name)
         if not tool_func:
-            await update.message.reply_text("❌ Error: No encontré la herramienta.")
+            await update.message.reply_text(" Error: No encontré la herramienta.")
             return True
 
         try:
@@ -1783,30 +1783,72 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-# ==================== RECORDATORIOS JOB ====================
+# ==================== RECORDATORIOS JOB (VERSIÓN ATÓMICA) ====================
 async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Versión atómica: SELECT + UPDATE en una sola operación.
+    Evita que múltiples instancias procesen los mismos recordatorios.
+    Muestra fecha y hora en el mensaje.
+    """
     try:
+        # OPERACIÓN ATÓMICA: Selecciona Y marca como enviado en un solo query
         query = """
-            SELECT id, chat_id, mensaje, fecha_recordatorio
-            FROM recordatorios
-            WHERE enviado = FALSE AND fecha_recordatorio <= (NOW() AT TIME ZONE 'UTC')
+            UPDATE recordatorios 
+            SET enviado = TRUE, fecha_ejecucion = CURRENT_TIMESTAMP 
+            WHERE id IN (
+                SELECT id FROM recordatorios 
+                WHERE enviado = FALSE 
+                AND fecha_recordatorio <= (NOW() AT TIME ZONE 'UTC')
+                ORDER BY fecha_recordatorio ASC
+                LIMIT 10
+            )
+            RETURNING id, chat_id, mensaje, fecha_recordatorio
         """
         pendientes = await ejecutar_query(query, fetch=True)
-        logger.info(f"🔍 Revisando recordatorios: {len(pendientes)} pendientes")
+        
+        if not pendientes:
+            logger.info("🔍 No hay recordatorios pendientes.")
+            return
+            
+        logger.info(f"🔍 Procesando {len(pendientes)} recordatorios pendientes")
+        
         for row in pendientes:
-            mensaje = f"🔔 *RECORDATORIO:*\n{row['mensaje']}"
+            # Convertir UTC a hora local de México
+            fecha_utc = row['fecha_recordatorio']
+            if ZONA_HORARIA:
+                fecha_utc_localized = pytz.UTC.localize(fecha_utc)
+                fecha_local = fecha_utc_localized.astimezone(ZONA_HORARIA)
+            else:
+                fecha_local = fecha_utc - timedelta(hours=6)
+            
+            # Formatear fecha y hora legible
+            fecha_formateada = fecha_local.strftime("%d/%m/%Y")
+            hora_formateada = fecha_local.strftime("%I:%M %p")
+            
+            # Mensaje con fecha y hora visibles
+            mensaje = (
+                f"🔔 *RECORDATORIO*\n"
+                f"📅 Fecha programada: {fecha_formateada}\n"
+                f"⏰ Hora: {hora_formateada}\n\n"
+                f"📝 {row['mensaje']}"
+            )
+            
             try:
-                await context.bot.send_message(chat_id=row['chat_id'], text=mensaje, parse_mode="Markdown")
-                # ARREGLO: Marcamos como enviado Y guardamos la fecha exacta de ejecución
-                await ejecutar_query(
-                    "UPDATE recordatorios SET enviado = TRUE, fecha_ejecucion = CURRENT_TIMESTAMP WHERE id = $1", 
-                    (row['id'],)
+                await context.bot.send_message(
+                    chat_id=row['chat_id'], 
+                    text=mensaje, 
+                    parse_mode="Markdown"
                 )
-                logger.info(f"✅ Recordatorio {row['id']} enviado y marcado como ejecutado.")
+                logger.info(f"✅ Recordatorio {row['id']} enviado a chat {row['chat_id']}")
             except Exception as e:
                 logger.error(f"❌ Error enviando recordatorio {row['id']}: {e}")
+                # Si falla el envío, revertir para reintentar
+                await ejecutar_query(
+                    "UPDATE recordatorios SET enviado = FALSE WHERE id = $1",
+                    (row['id'],)
+                )
     except Exception as e:
-        logger.error(f"❌ Error en checar_recordatorios: {e}")
+        logger.error(f" Error en checar_recordatorios: {e}")
 
 
 # ==================== INICIO ====================
