@@ -705,6 +705,7 @@ def _normalizar_texto_hora(texto: str) -> str:
 def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], Optional[datetime]]:
     original = fecha_texto or ""
     texto = _normalizar_texto_hora(original)
+    # 🚨 OBTIENE LA HORA EN VIVO EN CADA LLAMADA
     hoy = ahora_cdmx()
     fecha_actual = hoy.strftime("%Y-%m-%d")
 
@@ -806,7 +807,7 @@ async def tool_crear_recordatorio(mensaje: str, fecha_recordatorio: str, chat_id
     try:
         fecha_normalizada, ambiguedad, fecha_local = interpretar_fecha(fecha_recordatorio)
         if not fecha_normalizada or not fecha_local:
-            return {"exito": False, "error": ambiguedad or f"️ No pude interpretar la fecha: '{fecha_recordatorio}'."}
+            return {"exito": False, "error": ambiguedad or f"⚠️ No pude interpretar la fecha: '{fecha_recordatorio}'."}
 
         fecha_utc = local_a_utc(fecha_local)
         ahora_utc = datetime.utcnow()
@@ -1324,10 +1325,21 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 
         historial = await obtener_historial(chat_id, 30)
         historial_podado = podar_historial(historial)
-        fecha_actual = ahora_cdmx().strftime("%Y-%m-%d %H:%M")
+        
+        # 🚨 REFUERZO DE FECHA Y HORA EN TIEMPO REAL
+        ahora = ahora_cdmx()
+        fecha_completa = ahora.strftime("%A, %d de %B de %Y")
+        hora_completa = ahora.strftime("%I:%M %p")
+        
         system_msg = {
             "role": "system",
-            "content": f"La fecha y hora actual en México es: {fecha_actual}. {SYSTEM_PROMPT_BASE}",
+            "content": (
+                f"🚨 INFORMACIÓN CRÍTICA EN TIEMPO REAL 🚨\n"
+                f"HOY ES: {fecha_completa}\n"
+                f"HORA ACTUAL: {hora_completa}\n"
+                f"⚠️ REGLA DE ORO: NUNCA asumas otra fecha. TODOS tus cálculos de 'hoy', 'mañana' o 'ayer' DEBEN basarse estrictamente en la fecha de HOY mencionada arriba. Si el usuario menciona una fecha diferente, pregúntale para confirmar, pero tu referencia SIEMPRE es la fecha de HOY.\n\n"
+                f"{SYSTEM_PROMPT_BASE}"
+            ),
         }
         mensajes_api = [system_msg] + historial_podado
 
@@ -1520,7 +1532,7 @@ async def manejar_aclaracion_hora(update: Update, context: ContextTypes.DEFAULT_
     fecha_normalizada, ambiguedad, fecha_local = interpretar_fecha(fecha_completa)
 
     if not fecha_local:
-        await update.message.reply_text(f"️ No pude convertir esa hora. {ambiguedad or 'Dime la hora otra vez.'}")
+        await update.message.reply_text(f"⚠️ No pude convertir esa hora. {ambiguedad or 'Dime la hora otra vez.'}")
         return True
 
     context.user_data.pop("aclaracion_hora_pendiente", None)
@@ -1581,7 +1593,7 @@ async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 _, _, fecha_local = interpretar_fecha(confirmacion.get("args_originales", {}).get("fecha_recordatorio", ""))
             if not fecha_local:
-                await update.message.reply_text("️ Perdí la fecha del recordatorio. Vuelve a indicarme la hora.")
+                await update.message.reply_text("⚠️ Perdí la fecha del recordatorio. Vuelve a indicarme la hora.")
                 context.user_data["confirmacion_pendiente"] = None
                 return True
 
@@ -1627,7 +1639,7 @@ async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYP
                 if fecha_local:
                     fecha_local += timedelta(days=1)
             if not fecha_local:
-                await update.message.reply_text("️ No pude recuperar la hora original. Vuelve a indicarla, por favor.")
+                await update.message.reply_text("⚠️ No pude recuperar la hora original. Vuelve a indicarla, por favor.")
                 context.user_data["confirmacion_pendiente"] = None
                 return True
             fecha_utc = local_a_utc(fecha_local)
@@ -1636,7 +1648,7 @@ async def manejar_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYP
                 (chat_id, mensaje_original, fecha_utc)
             )
             fecha_mostrar = fecha_local.strftime("%d/%m/%Y %I:%M %p")
-            respuesta = f"✅ Recordatorio programado para mañana, {fecha_mostrar}.\n\n *{mensaje_original}*"
+            respuesta = f"✅ Recordatorio programado para mañana, {fecha_mostrar}.\n\n📝 *{mensaje_original}*"
             await guardar_historial(chat_id, {"role": "assistant", "content": respuesta})
             await update.message.reply_text(respuesta, parse_mode="Markdown")
             context.user_data["confirmacion_pendiente"] = None
@@ -1693,7 +1705,7 @@ async def manejar_seleccion(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         context.user_data["esperando_seleccion"] = None
         tool_func = TOOL_FUNCTIONS.get(tool_name)
         if not tool_func:
-            await update.message.reply_text(" Error: No encontré la herramienta.")
+            await update.message.reply_text("❌ Error: No encontré la herramienta.")
             return True
 
         try:
@@ -1848,7 +1860,7 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
                     (row['id'],)
                 )
     except Exception as e:
-        logger.error(f" Error en checar_recordatorios: {e}")
+        logger.error(f"❌ Error en checar_recordatorios: {e}")
 
 
 # ==================== INICIO ====================
