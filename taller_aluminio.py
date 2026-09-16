@@ -273,7 +273,6 @@ async def _resolver_proyecto_o_pedir(
     if not proyectos:
         return None, {"exito": False, "error": f"No hay proyectos activos para {cliente}."}
     
-    # DEFENSA 1: Si solo hay 1 proyecto, úsalo directo
     if len(proyectos) == 1:
         return proyectos[0], None
 
@@ -354,7 +353,6 @@ async def tool_registrar_pago(cliente: str, monto: float, referencia: str = None
     
     proyectos = await obtener_proyectos_activos(cliente)
     
-    # DEFENSA 2: Búsqueda de rescate
     if not proyectos:
         query_todos = """
             SELECT c.nombre, p.nombre_corto, p.id, p.monto_total, p.monto_pagado, p.estado
@@ -447,7 +445,6 @@ async def tool_registrar_compra_material(
 ):
     proyectos = await obtener_proyectos_activos(cliente)
     
-    # DEFENSA 2: Búsqueda de rescate
     if not proyectos:
         query_todos = """
             SELECT c.nombre, p.nombre_corto, p.id FROM proyectos p JOIN clientes c ON p.cliente_id = c.id WHERE p.estado NOT IN ('Liquidado', 'Cancelado')
@@ -541,7 +538,6 @@ async def tool_consultar_proyectos(tipo: str = "activos", cliente: str = None):
 async def tool_cerrar_proyecto(cliente: str, nombre_corto: str = None):
     proyectos = await obtener_proyectos_activos(cliente)
     
-    # DEFENSA 2: Búsqueda de rescate
     if not proyectos:
         query_todos = """
             SELECT c.nombre, p.nombre_corto, p.id, p.monto_total, p.monto_pagado, p.estado
@@ -690,28 +686,25 @@ async def tool_editar_cliente(cliente: str, telefono: str = None, direccion: str
     return {"exito": True, "mensaje": f"Datos actualizados correctamente para el cliente '{nombre_real}'."}
 
 
-# ==================== INTERPRETACIÓN DE FECHAS ====================
-def _normalizar_texto_hora(texto: str) -> str:
-    texto = texto.lower().strip()
-    reemplazos = {
-        "a.m.": "am", "p.m.": "pm", "a. m.": "am", "p. m.": "pm",
-        "a m": "am", "p m": "pm", "mediodia": "mediodía", "medianoche": "00:00",
-    }
-    for a, b in reemplazos.items():
-        texto = texto.replace(a, b)
-    return texto
-
-
+# ==================== INTERPRETACIÓN DE FECHAS (INFALIBLE) ====================
 def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], Optional[datetime]]:
     original = fecha_texto or ""
-    texto = _normalizar_texto_hora(original)
-    # 🚨 OBTIENE LA HORA EN VIVO EN CADA LLAMADA
+    texto = original.lower().strip()
+    
+    # Normalización robusta para evitar fallos de STT
+    texto = texto.replace("a. m.", "am").replace("a.m.", "am").replace("a m", "am")
+    texto = texto.replace("p. m.", "pm").replace("p.m.", "pm").replace("p m", "pm")
+    texto = texto.replace("mediodia", "12 pm").replace("medianoche", "12 am")
+    
     hoy = ahora_cdmx()
     fecha_actual = hoy.strftime("%Y-%m-%d")
 
-    if re.search(r"\bpasado mañana\b", texto):
+    # Lógica de fecha infalible (el orden importa: "hoy" va antes que "mañana")
+    if "pasado mañana" in texto:
         fecha_base = hoy + timedelta(days=2)
-    elif re.search(r"\bmañana\b|\bmanana\b", texto):
+    elif "hoy" in texto:
+        fecha_base = hoy
+    elif "mañana" in texto or "manana" in texto:
         fecha_base = hoy + timedelta(days=1)
     else:
         fecha_base = hoy
@@ -733,12 +726,13 @@ def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], O
     except ValueError:
         return None, "La fecha indicada no es válida. Usa, por ejemplo, 30/08/2026.", None
 
-    tiene_am = bool(re.search(r"\b(?:am|a\.m\.)\b", texto))
-    tiene_pm = bool(re.search(r"\b(?:pm|p\.m\.)\b", texto))
-    es_madrugada = bool(re.search(r"\b(?:madrugada)\b", texto))
-    es_manana = bool(re.search(r"\b(?:mañana|manana)\b", texto))
-    es_tarde = bool(re.search(r"\b(?:tarde)\b", texto))
-    es_noche = bool(re.search(r"\b(?:noche)\b", texto))
+    # Detección de periodo del día usando 'in' para máxima compatibilidad con STT
+    tiene_am = "am" in texto
+    tiene_pm = "pm" in texto
+    es_madrugada = "madrugada" in texto
+    es_manana = any(x in texto for x in ["mañana", "manana", "de la mañana", "por la mañana", "en la mañana"])
+    es_tarde = any(x in texto for x in ["tarde", "de la tarde", "por la tarde", "en la tarde"])
+    es_noche = any(x in texto for x in ["noche", "de la noche", "por la noche", "en la noche"])
 
     hora = minuto = None
     patrones = [
@@ -752,6 +746,7 @@ def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], O
             hora = int(m.group(1))
             minuto = 30 if len(m.groups()) == 1 else int(m.group(2))
             break
+            
     if hora is None:
         m = re.search(r"\b(\d{1,2})\s+(\d{2})\b", texto)
         if m:
@@ -768,30 +763,23 @@ def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], O
                         hora, minuto = candidato, 0
 
     if hora is None:
-        return None, "No encontré una hora. Por favor, dime la hora, por ejemplo: '3:30 AM'.", None
+        return None, "No encontré una hora. Por favor, dime la hora, por ejemplo: '3:30 AM' o '10 de la mañana'.", None
     if minuto is None:
         minuto = 0
     if hora > 23 or minuto > 59:
         return None, "La hora indicada no es válida. Usa una hora entre 00:00 y 23:59.", None
 
-    if tiene_am:
+    # Lógica de ajuste de hora infalible
+    if tiene_am or es_manana or es_madrugada:
         if hora == 12:
             hora = 0
-    elif tiene_pm:
-        if hora < 12:
-            hora += 12
-    elif es_madrugada:
-        if hora == 12:
-            hora = 0
-        elif hora >= 6:
-            return None, "Para esa hora necesito saber si es de la mañana o de la tarde.", None
-    elif es_manana:
-        if hora == 12:
-            hora = 0
-    elif es_tarde or es_noche:
+        elif hora > 12:
+            hora = hora - 12 # Corrección por si dicen "13 de la mañana"
+    elif tiene_pm or es_tarde or es_noche:
         if hora < 12:
             hora += 12
     else:
+        # Si no hay contexto de AM/PM y la hora es ambigua (1-11), preguntamos
         if 1 <= hora <= 11:
             return None, f"¿Quieres decir {hora:02d}:{minuto:02d} AM o {hora + 12:02d}:{minuto:02d} PM?", None
 
@@ -800,6 +788,7 @@ def interpretar_fecha(fecha_texto: str) -> Tuple[Optional[str], Optional[str], O
         fecha_local = datetime.strptime(fecha_normalizada, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None, "Formato de fecha inválido.", None
+        
     return fecha_normalizada, None, fecha_local
 
 
@@ -1236,28 +1225,17 @@ SYSTEM_PROMPT_BASE = (
 
 # ==================== PODA DE HISTORIAL (A PRUEBA DE BALAS) ====================
 def podar_historial(messages: List[Dict]) -> List[Dict]:
-    """
-    Versión a prueba de balas: Nunca deja mensajes 'tool' huérfanos.
-    Mantiene los últimos N mensajes, pero si corta, asegura que las secuencias assistant->tool estén intactas.
-    """
     MAX_MESSAGES = 16
-    
     if len(messages) <= MAX_MESSAGES:
         return messages
-    
     start_idx = len(messages) - MAX_MESSAGES
-    
-    # VERIFICACIÓN DE SEGURIDAD: Si el mensaje donde vamos a cortar es un 'tool',
-    # debemos retroceder hasta encontrar su mensaje 'assistant' padre que tiene el 'tool_call'.
     if start_idx > 0 and messages[start_idx].get("role") == "tool":
         tool_call_id = messages[start_idx].get("tool_call_id")
-        
         for i in range(start_idx - 1, -1, -1):
             if messages[i].get("role") == "assistant" and messages[i].get("tool_calls"):
                 if any(tc.get("id") == tool_call_id for tc in messages[i].get("tool_calls", [])):
                     start_idx = i
                     break
-                    
     return messages[start_idx:]
 
 
@@ -1289,7 +1267,6 @@ def transcribir_audio_buffer(buffer: io.BytesIO) -> str:
 async def _obtener_texto(update: Update) -> Optional[str]:
     if update.message and update.message.text:
         return update.message.text
-
     if update.message and update.message.voice:
         if not groq_client:
             await update.message.reply_text("❌ El servicio de transcripción de voz no está configurado.")
@@ -1309,7 +1286,6 @@ async def _obtener_texto(update: Update) -> Optional[str]:
             logger.error(f"Error manejando audio: {e}")
             await update.message.reply_text("❌ Error al procesar el audio. Intenta de nuevo.")
             return None
-
     return None
 
 
@@ -1326,7 +1302,6 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         historial = await obtener_historial(chat_id, 30)
         historial_podado = podar_historial(historial)
         
-        # 🚨 REFUERZO DE FECHA Y HORA EN TIEMPO REAL
         ahora = ahora_cdmx()
         fecha_completa = ahora.strftime("%A, %d de %B de %Y")
         hora_completa = ahora.strftime("%I:%M %p")
@@ -1515,7 +1490,7 @@ async def manejar_aclaracion_hora(update: Update, context: ContextTypes.DEFAULT_
     if not pendiente:
         return False
 
-    t = _normalizar_texto_hora(texto or "")
+    t = texto.lower().strip()
     t = re.sub(r"\s+", " ", t).strip()
 
     if re.search(r"\b(?:pm|punto de la tarde|de la tarde|por la tarde|tarde|noche)\b", t):
@@ -1797,13 +1772,7 @@ async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== RECORDATORIOS JOB (VERSIÓN ATÓMICA) ====================
 async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Versión atómica: SELECT + UPDATE en una sola operación.
-    Evita que múltiples instancias procesen los mismos recordatorios.
-    Muestra fecha y hora en el mensaje.
-    """
     try:
-        # OPERACIÓN ATÓMICA: Selecciona Y marca como enviado en un solo query
         query = """
             UPDATE recordatorios 
             SET enviado = TRUE, fecha_ejecucion = CURRENT_TIMESTAMP 
@@ -1825,7 +1794,6 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"🔍 Procesando {len(pendientes)} recordatorios pendientes")
         
         for row in pendientes:
-            # Convertir UTC a hora local de México
             fecha_utc = row['fecha_recordatorio']
             if ZONA_HORARIA:
                 fecha_utc_localized = pytz.UTC.localize(fecha_utc)
@@ -1833,11 +1801,9 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
             else:
                 fecha_local = fecha_utc - timedelta(hours=6)
             
-            # Formatear fecha y hora legible
             fecha_formateada = fecha_local.strftime("%d/%m/%Y")
             hora_formateada = fecha_local.strftime("%I:%M %p")
             
-            # Mensaje con fecha y hora visibles
             mensaje = (
                 f"🔔 *RECORDATORIO*\n"
                 f"📅 Fecha programada: {fecha_formateada}\n"
@@ -1854,7 +1820,6 @@ async def checar_recordatorios(context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"✅ Recordatorio {row['id']} enviado a chat {row['chat_id']}")
             except Exception as e:
                 logger.error(f"❌ Error enviando recordatorio {row['id']}: {e}")
-                # Si falla el envío, revertir para reintentar
                 await ejecutar_query(
                     "UPDATE recordatorios SET enviado = FALSE WHERE id = $1",
                     (row['id'],)
